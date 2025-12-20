@@ -16,8 +16,6 @@ import time
 import yt_dlp
 from flask import Flask, request, jsonify, send_from_directory
 
-VERSION = "1.0.0"
-
 class Api:
     """PyWebView API for native dialog access."""
     def select_folder(self):
@@ -295,6 +293,17 @@ def download():
             result_queue.put({'final_file': filename})
 
     ydl_opts['progress_hooks'] = [progress_hook]
+    
+    def postprocessor_hook(d):
+        """Callback for yt-dlp post-processing (e.g., audio conversion)."""
+        if d['status'] == 'finished':
+            # Capture the final filepath after post-processing
+            final_path = d.get('info_dict', {}).get('filepath')
+            if final_path:
+                msg_queue.put({'log': f"[postprocess] Final file: {final_path}"})
+                result_queue.put({'final_file': final_path})
+    
+    ydl_opts['postprocessor_hooks'] = [postprocessor_hook]
 
     def run_download_thread():
         try:
@@ -355,10 +364,24 @@ def download():
             # Ensure thread is joined
             t.join(timeout=1)
             
+            # Final drain of result_queue to capture final_file and success status
+            # This fixes a race condition where results weren't captured before thread exit check
+            try:
+                while True:
+                    res = result_queue.get_nowait()
+                    if 'final_file' in res:
+                        final_file = res['final_file']
+                    if 'success' in res:
+                        download_success = res['success']
+                        if not res['success']:
+                            yield f"data: {json.dumps({'error': res.get('error')})}\n\n"
+            except queue.Empty:
+                pass
+            
             # Post-download trimming (if requested)
             if download_success and trim_start and trim_end and final_file:
                 try:
-                    yield f"data: {json.dumps({'log': f'> [Aura] Trimming video from {trim_start} to {trim_end}...'})}\n\n"
+                    yield f"data: {json.dumps({'log': f'> [FinFetcher] Trimming video from {trim_start} to {trim_end}...'})}\n\n"
                     
                     base, ext = os.path.splitext(final_file)
                     trimmed_file = f"{base}_trimmed{ext}"
@@ -404,19 +427,19 @@ def download():
                     trim_proc.wait()
                     
                     if trim_proc.returncode == 0:
-                        yield f"data: {json.dumps({'log': '> [Aura] Trim successful! Replacing original file...'})}\n\n"
+                        yield f"data: {json.dumps({'log': '> [FinFetcher] Trim successful! Replacing original file...'})}\n\n"
                         try:
                             if os.path.exists(final_file):
                                 os.remove(final_file)
                             os.rename(trimmed_file, final_file)
-                            yield f"data: {json.dumps({'log': '> [Aura] Ready!'})}\n\n"
+                            yield f"data: {json.dumps({'log': '> [FinFetcher] Ready!'})}\n\n"
                         except Exception as e:
-                            yield f"data: {json.dumps({'log': f'> [Aura] Error replacing file: {e}'})}\n\n"
+                            yield f"data: {json.dumps({'log': f'> [FinFetcher] Error replacing file: {e}'})}\n\n"
                     else:
-                        yield f"data: {json.dumps({'log': f'> [Aura] Trim failed with code {trim_proc.returncode}'})}\n\n"
+                        yield f"data: {json.dumps({'log': f'> [FinFetcher] Trim failed with code {trim_proc.returncode}'})}\n\n"
                          
                 except Exception as e:
-                    yield f"data: {json.dumps({'log': f'> [Aura] Trim error: {e}'})}\n\n"
+                    yield f"data: {json.dumps({'log': f'> [FinFetcher] Trim error: {e}'})}\n\n"
             
             # Send final status
             if download_success:
