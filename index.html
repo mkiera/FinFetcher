@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aura Downloader</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="background-blobs">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+    </div>
+
+    <div class="container">
+        <header>
+            <h1>Aura Downloader</h1>
+            <p>Premium YouTube & Music Extractor</p>
+        </header>
+
+        <main class="card glass-panel">
+            <div class="input-group">
+                <input type="text" id="urlInput" placeholder="Paste YouTube link here..." autocomplete="off">
+                <div class="status-indicator" id="urlStatus"></div>
+            </div>
+
+            <div class="options-grid">
+                <div class="option-card" data-mode="video" onclick="selectMode('video')">
+                    <div class="icon">🎬</div>
+                    <span>Video</span>
+                </div>
+                <div class="option-card" data-mode="audio" onclick="selectMode('audio')">
+                    <div class="icon">🎵</div>
+                    <span>Audio</span>
+                </div>
+            </div>
+
+            <div class="advanced-options">
+                <div class="advanced-header" onclick="toggleAdvanced()">
+                    <span>Advanced Options</span>
+                    <span class="chevron">▼</span>
+                </div>
+
+                <div id="advancedContent" class="advanced-content hidden">
+                    <div class="toggle-row">
+                        <span>Remove Sponsors</span>
+                        <label class="switch small">
+                            <input type="checkbox" id="sponsorToggle">
+                            <span class="slider round"></span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-row">
+                        <span>Log to File</span>
+                        <label class="switch small">
+                            <input type="checkbox" id="logToggle">
+                            <span class="slider round"></span>
+                        </label>
+                    </div>
+
+                    <div class="control-row">
+                        <span>Quality</span>
+                        <select id="qualitySelect">
+                            <option value="max">Max (4K/8K)</option>
+                            <option value="1080p">1080p Compatible</option>
+                        </select>
+                    </div>
+
+                    <div class="control-row">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="trimToggle" onchange="toggleTrimInputs()">
+                            <span>Trim Video</span>
+                        </label>
+                    </div>
+
+                    <div id="trimInputs" class="trim-inputs hidden">
+                        <div class="slider-wrapper">
+                            <div class="slider-track"></div>
+                            <div class="slider-fill" id="sliderFill"></div>
+                            <input type="range" id="rangeStart" min="0" max="100" value="0" step="1"
+                                oninput="updateSlider('start')">
+                            <input type="range" id="rangeEnd" min="0" max="100" value="100" step="1"
+                                oninput="updateSlider('end')">
+                        </div>
+
+                        <div class="time-inputs-row">
+                            <input type="text" id="trimStart" placeholder="00:00" class="time-input"
+                                onchange="updateFromText()">
+                            <span>to</span>
+                            <input type="text" id="trimEnd" placeholder="End" class="time-input"
+                                onchange="updateFromText()">
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="toggle-container">
+                <label class="switch">
+                    <input type="checkbox" id="locationToggle">
+                    <span class="slider round"></span>
+                </label>
+                <span class="toggle-label">Ask for Download Location</span>
+            </div>
+
+            <button id="downloadBtn" onclick="initiateDownload()">Download</button>
+
+            <div id="progressArea" class="hidden">
+                <div class="log-container" id="logContainer">
+                    <div class="log-entry">Ready to download...</div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modal for Playlist Selection -->
+    <div id="playlistModal" class="modal hidden">
+        <div class="modal-content glass-panel">
+            <h2>Playlist Detected</h2>
+            <p>Do you want to download the entire playlist or just the single video?</p>
+            <div class="modal-actions">
+                <button class="secondary" onclick="confirmDownload('single')">Just This Video</button>
+                <button class="primary" onclick="confirmDownload('playlist')">Download Playlist</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
