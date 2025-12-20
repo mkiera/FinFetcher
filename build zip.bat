@@ -21,7 +21,7 @@ set TEMP_DIR=%TEMP%\FinFetcher_build
 if exist "%TEMP_DIR%" rmdir /s /q "%TEMP_DIR%"
 mkdir "%TEMP_DIR%"
 
-REM Copy only the needed files
+REM Copy only the needed files (build scripts are intentionally excluded)
 copy "index.html" "%TEMP_DIR%\" >nul
 copy "style.css" "%TEMP_DIR%\" >nul
 copy "script.js" "%TEMP_DIR%\" >nul
