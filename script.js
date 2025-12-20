@@ -1,6 +1,6 @@
 /**
- * Aura Downloader v1.0.0
- * Frontend JavaScript for YouTube/Music download application.
+ * FinFetcher 🦭
+ * Frontend JavaScript for video/music download application.
  */
 
 // State

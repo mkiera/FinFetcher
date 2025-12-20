@@ -2,7 +2,7 @@
 cd /d "%~dp0"
 
 echo ========================================
-echo   Aura Downloader - Build ZIP
+echo   FinFetcher - Build ZIP
 echo ========================================
 echo.
 
@@ -10,14 +10,14 @@ REM Read version from version.txt
 set /p VERSION=<version.txt
 
 REM Set output path with version
-set OUTPUT=%USERPROFILE%\Downloads\AuraDownloader_v%VERSION%.zip
+set OUTPUT=%USERPROFILE%\Downloads\FinFetcher_v%VERSION%.zip
 
 REM Remove old zip if exists
 if exist "%OUTPUT%" del "%OUTPUT%"
 
 REM Create temp folder with only needed files
 echo Building v%VERSION%...
-set TEMP_DIR=%TEMP%\AuraDownloader_build
+set TEMP_DIR=%TEMP%\FinFetcher_build
 if exist "%TEMP_DIR%" rmdir /s /q "%TEMP_DIR%"
 mkdir "%TEMP_DIR%"
 

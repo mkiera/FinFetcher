@@ -1,6 +1,6 @@
 """
-Aura Downloader v1.0.0
-A premium YouTube & music downloader desktop application.
+FinFetcher 🦭
+A friendly video & music downloader desktop application.
 Built with Flask + PyWebView for native desktop experience.
 """
 
@@ -295,5 +295,5 @@ def download():
 
 if __name__ == '__main__':
     api = Api()
-    webview.create_window('Aura Downloader', app, js_api=api, width=700, height=1050, resizable=True)
+    webview.create_window('FinFetcher', app, js_api=api, width=700, height=1050, resizable=True)
     webview.start()

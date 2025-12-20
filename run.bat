@@ -25,5 +25,5 @@ if errorlevel 1 (
 )
 
 REM Launch app without console using pyw
-echo Starting Aura Downloader...
+echo Starting FinFetcher...
 start "" pyw "%~dp0main.pyw"
