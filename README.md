@@ -1,0 +1,48 @@
+# 🦭 FinFetcher
+
+A friendly video & music downloader built with Python and PyWebView.
+
+![FinFetcher](icon.png)
+
+## Features
+
+- 🎬 **Video Download** - Download videos in various qualities (up to 4K/8K)
+- 🎵 **Audio Extraction** - Extract audio as MP3
+- ✂️ **Video Trimming** - Trim videos to specific timestamps
+- 📂 **Playlist Support** - Download entire playlists
+- 🎨 **Modern UI** - Beautiful glassmorphism design
+
+## Download
+
+Get the latest release from the [Releases](../../releases) page.
+
+**First Run:** FFmpeg will be automatically downloaded and installed (~30MB) on first launch.
+
+## Development Setup
+
+1. Install Python 3.11+
+2. Install dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+3. Run:
+   ```
+   python main.pyw
+   ```
+   Or use `run.bat` on Windows.
+
+## Building
+
+### Build EXE (Windows)
+```
+build exe.bat
+```
+
+### Build ZIP (Source)
+```
+build zip.bat
+```
+
+## License
+
+MIT License
