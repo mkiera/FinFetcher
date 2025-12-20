@@ -97,9 +97,18 @@ def download():
             '--audio-quality', '0', # Best quality
         ])
     else: # video
+        # Use simple, permissive format selection with fallbacks
+        # Don't require specific codecs - let yt-dlp pick best available
         format_spec = 'bestvideo+bestaudio/best'
+        
         if quality == '1080p':
-            format_spec = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
+            format_spec = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+        elif quality != 'max' and quality.endswith('p'):
+            try:
+                h = int(quality[:-1])
+                format_spec = f'bestvideo[height<={h}]+bestaudio/best[height<={h}]/best'
+            except:
+                pass
             
         cmd.extend([
             '-f', format_spec,
@@ -110,47 +119,126 @@ def download():
     if sponsorblock:
         cmd.extend(['--sponsorblock-remove', 'all'])
 
-    if trim_start and trim_end:
-        cmd.extend(['--download-sections', f"*{trim_start}-{trim_end}"])
-
+    # Remove yt-dlp trim args to download full video first
+    # This prevents timestamp/keyframe issues associated with trimming during download
+    
+    # We will still ensure MP4 container for the full download
+    cmd.extend(['--merge-output-format', 'mp4'])
+    
     cmd.append(url)
     
     # Run download
     try:
         def generate():
-            # Add randomized sleep to help avoid 429s slightly, 
-            # though usually it's IP based. 
-            # We can also handle the error in the output parsing.
+            environ = os.environ.copy()
+            environ["PYTHONDONTWRITEBYTECODE"] = "1"
             
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1,
-                universal_newlines=True
+                encoding='utf-8',
+                errors='replace',
+                env=environ
             )
             
-            for line in process.stdout:
-                line_content = line.strip()
-                # Check for 429
-                if "HTTP Error 429" in line_content:
-                    yield f"data: {json.dumps({'error': 'Error 429: Too Many Requests. YouTube is sort of rate-limiting you. Try again later.'})}\n\n"
-                    process.terminate()
-                    break
-                    
-                yield f"data: {json.dumps({'log': line_content})}\n\n"
-                
-                # Log to file if enabled
-                if log_to_file:
-                    try:
-                        log_path = os.path.join(save_path, "download_log.txt")
-                        with open(log_path, "a", encoding="utf-8") as f:
-                            f.write(line_content + "\n")
-                    except:
-                        pass # Don't fail download if logging fails
+            final_file = None
             
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                if line:
+                    line_content = line.strip()
+                    yield f"data: {json.dumps({'log': line_content})}\n\n"
+                    
+                    # Capture filename
+                    if '[Merger] Merging formats into' in line:
+                         # Quote stripping and path fix
+                         parts = line.split('into')
+                         if len(parts) > 1:
+                             final_file = parts[1].strip().strip('"')
+                    elif '[download] Destination:' in line:
+                         parts = line.split('Destination:')
+                         if len(parts) > 1:
+                             path_part = parts[1].strip()
+                             # Only set if not already set by Merger (Merger is definitive for final file)
+                             if not final_file:
+                                 final_file = path_part
+                    elif 'Already downloaded:' in line:
+                         parts = line.split('Already downloaded:')
+                         if len(parts) > 1:
+                             final_file = parts[1].strip()
+                    
+                    # Log to file
+                    if log_to_file:
+                        try:
+                            log_path = os.path.join(save_path, "download_log.txt")
+                            with open(log_path, "a", encoding="utf-8") as f:
+                                f.write(line_content + "\n")
+                        except:
+                            pass
+
             process.wait()
+            
+            # Manual Trim Logic
+            if process.returncode == 0 and trim_start and trim_end and final_file:
+                try:
+                    yield f"data: {json.dumps({'log': f'> [Aura] Trimming video from {trim_start} to {trim_end}...'})}\n\n"
+                    
+                    # Construct output filename
+                    base, ext = os.path.splitext(final_file)
+                    trimmed_file = f"{base}_trimmed{ext}"
+                    
+                    # FFmpeg precise trim:
+                    # -ss BEFORE -i is faster.
+                    # -ss AFTER -i is accurate (decodes everything).
+                    # User complained of frozen frames -> Acccuracy is paramount.
+                    # We accept slower processing for correct output.
+                    ffmpeg_cmd = [
+                        'ffmpeg', '-y',
+                        '-i', final_file,
+                        '-ss', trim_start,
+                        '-to', trim_end,
+                        '-c:v', 'libx264', '-preset', 'fast', '-crf', '22', # Good quality h264
+                        '-c:a', 'aac', '-b:a', '192k',
+                        '-strict', 'experimental',
+                        trimmed_file
+                    ]
+                    
+                    trim_proc = subprocess.Popen(
+                        ffmpeg_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding='utf-8',
+                        errors='replace',
+                        env=environ
+                    )
+                    
+                    for tline in trim_proc.stdout:
+                        # Optional: filter ffmpeg logs or show them?
+                        # Showing them helps debug
+                        yield f"data: {json.dumps({'log': f'[ffmpeg] {tline.strip()}'})}\n\n"
+                        
+                    trim_proc.wait()
+                    
+                    if trim_proc.returncode == 0:
+                        yield f"data: {json.dumps({'log': '> [Aura] Trim successful! Replacing original file...'})}\n\n"
+                        try:
+                            if os.path.exists(final_file):
+                                os.remove(final_file)
+                            os.rename(trimmed_file, final_file)
+                            yield f"data: {json.dumps({'log': '> [Aura] ready!'})}\n\n"
+                        except Exception as e:
+                            yield f"data: {json.dumps({'log': f'> [Aura] Error replacing file: {e}'})}\n\n"
+                    else:
+                         yield f"data: {json.dumps({'log': f'> [Aura] Trim failed with code {trim_proc.returncode}'})}\n\n"
+                         
+                except Exception as e:
+                    yield f"data: {json.dumps({'log': f'> [Aura] Trim error: {e}'})}\n\n"
+            
             if process.returncode == 0:
                 yield f"data: {json.dumps({'status': 'completed'})}\n\n"
             elif process.returncode != 0 and "429" not in str(process.returncode): # Don't send error again if we caught it

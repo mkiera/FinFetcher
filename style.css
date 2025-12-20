@@ -249,7 +249,7 @@ button:active {
 }
 
 .log-entry {
-    animation: fadeIn 0.3s ease;
+    /* animation: fadeIn 0.3s ease; Removed to prevent rendering issues */
 }
 
 @keyframes fadeIn {
@@ -301,7 +301,7 @@ button:active {
 .advanced-content {
     padding: 15px;
     border-top: 1px solid var(--glass-border);
-    animation: slideDown 0.3s ease;
+    /* animation: slideDown 0.3s ease; Removed to prevent rendering issues */
 }
 
 .toggle-row,

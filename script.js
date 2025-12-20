@@ -49,7 +49,7 @@ function log(message) {
     container.scrollTop = container.scrollHeight;
 }
 
-async function fetchVideoInfo(url) {
+async function fetchVideoInfo(url, preserveState = false) {
     try {
         document.getElementById('urlStatus').textContent = "⌛";
         document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Retrieving video metadata...</div>";
@@ -64,10 +64,14 @@ async function fetchVideoInfo(url) {
         if (data.error) throw new Error(data.error);
 
         videoDuration = data.duration || 0;
-        initializeSlider();
+        if (!preserveState) {
+            initializeSlider();
+        }
 
         // Populate Quality Options
         const qualitySelect = document.getElementById('qualitySelect');
+        const previousValue = preserveState ? qualitySelect.value : null;
+
         qualitySelect.innerHTML = '<option value="max">Max (4K/8K)</option><option value="1080p">1080p Compatible</option>';
         if (data.formats && data.formats.length > 0) {
             // Get unique heights >= 144p
@@ -81,6 +85,11 @@ async function fetchVideoInfo(url) {
                     qualitySelect.appendChild(opt);
                 });
             }
+        }
+
+        // Restore selection if it exists in new options
+        if (previousValue && Array.from(qualitySelect.options).some(o => o.value === previousValue)) {
+            qualitySelect.value = previousValue;
         }
 
         document.getElementById('urlStatus').textContent = "✅";
@@ -108,7 +117,7 @@ async function initiateDownload() {
     document.getElementById('downloadBtn').textContent = "Checking...";
 
     // Check info (or reuse if we have it, but safest to fetch to be sure of playlist status)
-    const data = await fetchVideoInfo(url);
+    const data = await fetchVideoInfo(url, true);
 
     if (data) {
         if (data.is_playlist) {
@@ -225,6 +234,25 @@ async function startDownload(type) {
     log(`Starting ${type} download...`);
     log(`Mode: ${currentMode}`);
 
+    // IMPORTANT: Collect Advanced Options BEFORE folder dialog
+    // The pywebview folder dialog can cause UI state to reset
+    const sponsors = document.getElementById('sponsorToggle').checked;
+    const logToFile = document.getElementById('logToggle').checked;
+    const quality = document.getElementById('qualitySelect').value;
+    const trim = document.getElementById('trimToggle').checked;
+    let trimStart = null;
+    let trimEnd = null;
+
+    if (trim) {
+        trimStart = document.getElementById('trimStart').value.trim();
+        trimEnd = document.getElementById('trimEnd').value.trim();
+        if (!trimStart || !trimEnd) {
+            alert("Please enter start and end times for trimming (e.g. 00:30, 01:45)");
+            resetUI();
+            return;
+        }
+    }
+
     const eventSource = new EventSource('/api/download-stream?dummy=avoid-cache');
 
     let savePath = null;
@@ -242,24 +270,6 @@ async function startDownload(type) {
             log(`Saving to: ${savePath}`);
         } catch (e) {
             log("Error selecting folder: " + e);
-        }
-    }
-
-    // Collect Advanced Options
-    const sponsors = document.getElementById('sponsorToggle').checked;
-    const logToFile = document.getElementById('logToggle').checked;
-    const quality = document.getElementById('qualitySelect').value;
-    const trim = document.getElementById('trimToggle').checked;
-    let trimStart = null;
-    let trimEnd = null;
-
-    if (trim) {
-        trimStart = document.getElementById('trimStart').value.trim();
-        trimEnd = document.getElementById('trimEnd').value.trim();
-        if (!trimStart || !trimEnd) {
-            alert("Please enter start and end times for trimming (e.g. 00:30, 01:45)");
-            resetUI();
-            return;
         }
     }
 
@@ -322,4 +332,18 @@ function resetUI() {
 
     // Ensure Trim Inputs stay visible if checked
     toggleTrimInputs();
+
+    // Preserve Advanced Options visibility (do not close it)
+    // No action needed - just don't touch advancedContent
+    // Force Advanced Options to be visible if it was open (or just ensure it's not hidden if user had it open)
+    // Since we don't track "was open" persistently across reloads (if reload happened), 
+    // we can explicitly check if we want it open. 
+    // BUT the text "Advanced Options" toggle logic relies on it.
+    // Let's just ensure the class is correct.
+    const advancedContent = document.getElementById('advancedContent');
+    // If the header arrow indicates open (▲), ensure content is shown
+    const chevron = document.querySelector('.advanced-header .chevron');
+    if (chevron.textContent === '▲') {
+        advancedContent.classList.remove('hidden');
+    }
 }
