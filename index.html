@@ -28,7 +28,51 @@
         <div class="bubble"></div>
     </div>
 
-    <div class="container">
+    <!-- Setup Screen (shown when ffmpeg is not installed) -->
+    <div id="setupScreen" class="setup-screen hidden">
+        <div class="setup-container glass-panel">
+            <div class="setup-header">
+                <h1>🦭 FinFetcher</h1>
+                <p class="setup-subtitle">First-time Setup</p>
+            </div>
+
+            <div class="setup-content">
+                <div class="setup-icon">⚙️</div>
+                <h2>FFmpeg Required</h2>
+                <p class="setup-description">
+                    FFmpeg is needed for video processing and audio extraction.
+                    Would you like to install it automatically?
+                </p>
+
+                <!-- Progress Section (hidden initially) -->
+                <div id="setupProgress" class="setup-progress hidden">
+                    <div class="setup-progress-bar">
+                        <div id="setupProgressFill" class="setup-progress-fill"></div>
+                    </div>
+                    <p id="setupStatus" class="setup-status">Connecting...</p>
+                </div>
+
+                <!-- Buttons (hidden during install) -->
+                <div id="setupButtons" class="setup-buttons">
+                    <button id="installBtn" class="primary" onclick="installFFmpeg()">
+                        Install Automatically
+                    </button>
+                    <button id="browseBtn" class="secondary" onclick="browseFFmpeg()">
+                        Browse...
+                    </button>
+                    <button id="exitBtn" class="tertiary" onclick="exitApp()">
+                        Exit
+                    </button>
+                </div>
+
+                <p class="setup-note">
+                    ~30 MB download • Saved to AppData
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <div class="container" id="mainContainer">
         <header>
             <h1>🦭 FinFetcher</h1>
             <p>A Video & Music Extractor</p>

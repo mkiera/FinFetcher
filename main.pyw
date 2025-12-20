@@ -13,57 +13,194 @@ import webview
 import threading
 import queue
 import time
+import zipfile
+import tempfile
+import shutil
 import yt_dlp
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
+from urllib.request import urlopen, Request
+from urllib.error import URLError
+
+
+class FFmpegManager:
+    """Manages ffmpeg installation and detection."""
+    
+    # FFmpeg download URL (gyan.dev essentials build - smaller ~30MB)
+    FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    
+    def __init__(self):
+        self._custom_path = None
+        self._config_file = os.path.join(self.get_app_data_dir(), 'config.json')
+        self._load_config()
+    
+    @staticmethod
+    def get_app_data_dir():
+        """Get the FinFetcher app data directory."""
+        if os.name == 'nt':
+            base = os.environ.get('APPDATA', os.path.expanduser('~'))
+        else:
+            base = os.path.expanduser('~/.config')
+        app_dir = os.path.join(base, 'FinFetcher')
+        os.makedirs(app_dir, exist_ok=True)
+        return app_dir
+    
+    def get_ffmpeg_dir(self):
+        """Get the directory containing ffmpeg binaries."""
+        if self._custom_path and os.path.exists(self._custom_path):
+            return self._custom_path
+        return os.path.join(self.get_app_data_dir(), 'ffmpeg')
+    
+    def get_ffmpeg_path(self):
+        """Get full path to ffmpeg executable."""
+        ffmpeg_name = 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg'
+        return os.path.join(self.get_ffmpeg_dir(), ffmpeg_name)
+    
+    def get_ffprobe_path(self):
+        """Get full path to ffprobe executable."""
+        ffprobe_name = 'ffprobe.exe' if os.name == 'nt' else 'ffprobe'
+        return os.path.join(self.get_ffmpeg_dir(), ffprobe_name)
+    
+    def is_installed(self):
+        """Check if ffmpeg is available."""
+        ffmpeg_path = self.get_ffmpeg_path()
+        return os.path.exists(ffmpeg_path)
+    
+    def set_custom_path(self, path):
+        """Set a custom ffmpeg directory path."""
+        ffmpeg_exe = os.path.join(path, 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg')
+        if os.path.exists(ffmpeg_exe):
+            self._custom_path = path
+            self._save_config()
+            return True
+        return False
+    
+    def _load_config(self):
+        """Load saved configuration."""
+        try:
+            if os.path.exists(self._config_file):
+                with open(self._config_file, 'r') as f:
+                    config = json.load(f)
+                    self._custom_path = config.get('ffmpeg_path')
+        except Exception:
+            pass
+    
+    def _save_config(self):
+        """Save configuration to disk."""
+        try:
+            config = {'ffmpeg_path': self._custom_path}
+            with open(self._config_file, 'w') as f:
+                json.dump(config, f)
+        except Exception:
+            pass
+    
+    def download_ffmpeg(self, progress_callback=None):
+        """
+        Download and install ffmpeg.
+        progress_callback(percent, status_text) is called with progress updates.
+        Returns True on success, False on failure.
+        """
+        try:
+            if progress_callback:
+                progress_callback(0, "Connecting to download server...")
+            
+            # Create request with User-Agent
+            req = Request(self.FFMPEG_URL, headers={'User-Agent': 'FinFetcher/1.0'})
+            
+            # Download to temp file
+            temp_dir = tempfile.mkdtemp()
+            zip_path = os.path.join(temp_dir, 'ffmpeg.zip')
+            
+            try:
+                with urlopen(req, timeout=60) as response:
+                    total_size = int(response.headers.get('Content-Length', 0))
+                    downloaded = 0
+                    chunk_size = 1024 * 64  # 64KB chunks
+                    
+                    with open(zip_path, 'wb') as f:
+                        while True:
+                            chunk = response.read(chunk_size)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            if total_size > 0 and progress_callback:
+                                percent = int((downloaded / total_size) * 70)  # 0-70% for download
+                                size_mb = downloaded / (1024 * 1024)
+                                total_mb = total_size / (1024 * 1024)
+                                progress_callback(percent, f"Downloading... {size_mb:.1f}/{total_mb:.1f} MB")
+                
+                if progress_callback:
+                    progress_callback(70, "Extracting files...")
+                
+                # Extract ffmpeg
+                ffmpeg_dir = os.path.join(self.get_app_data_dir(), 'ffmpeg')
+                os.makedirs(ffmpeg_dir, exist_ok=True)
+                
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    # Find the bin folder in the archive
+                    bin_files = [n for n in zf.namelist() if '/bin/' in n and n.endswith('.exe')]
+                    total_files = len(bin_files)
+                    
+                    for i, name in enumerate(bin_files):
+                        # Extract just the filename, not the path
+                        filename = os.path.basename(name)
+                        if filename:
+                            if progress_callback:
+                                progress_callback(70 + int((i / max(total_files, 1)) * 25), f"Extracting {filename}...")
+                            
+                            # Extract to ffmpeg dir
+                            with zf.open(name) as src, open(os.path.join(ffmpeg_dir, filename), 'wb') as dst:
+                                dst.write(src.read())
+                
+                if progress_callback:
+                    progress_callback(95, "Verifying installation...")
+                
+                # Verify
+                if self.is_installed():
+                    if progress_callback:
+                        progress_callback(100, "Installation complete!")
+                    return True
+                else:
+                    if progress_callback:
+                        progress_callback(0, "Error: FFmpeg not found after extraction")
+                    return False
+                    
+            finally:
+                # Cleanup temp files
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception:
+                    pass
+                    
+        except URLError as e:
+            if progress_callback:
+                progress_callback(0, f"Download failed: {str(e)}")
+            return False
+        except Exception as e:
+            if progress_callback:
+                progress_callback(0, f"Error: {str(e)}")
+            return False
+
+
+# Global FFmpeg manager instance
+ffmpeg_manager = FFmpegManager()
 
 
 def get_ffmpeg_path():
-    """Get the path to the bundled ffmpeg executable."""
-    # Check if running as PyInstaller bundle
-    if getattr(sys, 'frozen', False):
-        # Running as bundled exe
-        base_path = sys._MEIPASS
-    else:
-        # Running in development
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    
-    ffmpeg_name = 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg'
-    ffmpeg_path = os.path.join(base_path, 'ffmpeg', ffmpeg_name)
-    
-    # Fallback to system ffmpeg if bundled version not found
-    if not os.path.exists(ffmpeg_path):
-        return 'ffmpeg'
-    
-    return ffmpeg_path
+    """Get the path to ffmpeg executable."""
+    return ffmpeg_manager.get_ffmpeg_path()
 
 
 def get_ffprobe_path():
-    """Get the path to the bundled ffprobe executable."""
-    if getattr(sys, 'frozen', False):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    
-    ffprobe_name = 'ffprobe.exe' if os.name == 'nt' else 'ffprobe'
-    ffprobe_path = os.path.join(base_path, 'ffmpeg', ffprobe_name)
-    
-    if not os.path.exists(ffprobe_path):
-        return 'ffprobe'
-    
-    return ffprobe_path
+    """Get the path to ffprobe executable."""
+    return ffmpeg_manager.get_ffprobe_path()
 
 
 def get_ffmpeg_dir():
     """Get the directory containing ffmpeg binaries."""
-    if getattr(sys, 'frozen', False):
-        base_path = sys._MEIPASS
-    else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    
-    ffmpeg_dir = os.path.join(base_path, 'ffmpeg')
-    
-    if os.path.exists(ffmpeg_dir):
-        return ffmpeg_dir
+    if ffmpeg_manager.is_installed():
+        return ffmpeg_manager.get_ffmpeg_dir()
     return None
 
 class Api:
@@ -81,6 +218,152 @@ def index():
 @app.route('/<path:path>')
 def serve_static(path):
     return send_from_directory('.', path)
+
+
+# ============ Setup API Endpoints ============
+
+@app.route('/api/setup/check', methods=['GET'])
+def setup_check():
+    """Check if ffmpeg is installed."""
+    return jsonify({
+        'installed': ffmpeg_manager.is_installed(),
+        'path': ffmpeg_manager.get_ffmpeg_dir() if ffmpeg_manager.is_installed() else None
+    })
+
+
+@app.route('/api/setup/install', methods=['GET'])
+def setup_install():
+    """Download and install ffmpeg with SSE progress updates."""
+    def generate():
+        def progress_callback(percent, status):
+            yield f"data: {json.dumps({'percent': percent, 'status': status})}\n\n"
+        
+        # Use a list to capture the result from the callback
+        result = [False]
+        last_update = [None]
+        
+        def wrapped_callback(percent, status):
+            last_update[0] = (percent, status)
+        
+        # Run download in a way that yields progress
+        try:
+            # We need to yield progress updates as they happen
+            # So we'll run the download in chunks and yield
+            yield f"data: {json.dumps({'percent': 0, 'status': 'Starting download...'})}\n\n"
+            
+            success = ffmpeg_manager.download_ffmpeg(
+                progress_callback=lambda p, s: last_update.__setitem__(0, (p, s))
+            )
+            
+            # Since we can't easily yield from the callback, we'll do a simpler approach
+            # Just run the download and report result
+            if success:
+                yield f"data: {json.dumps({'percent': 100, 'status': 'Installation complete!', 'success': True})}\n\n"
+            else:
+                yield f"data: {json.dumps({'percent': 0, 'status': 'Installation failed', 'success': False})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'percent': 0, 'status': f'Error: {str(e)}', 'success': False})}\n\n"
+    
+    return Response(generate(), mimetype='text/event-stream')
+
+
+@app.route('/api/setup/install-sync', methods=['POST'])
+def setup_install_sync():
+    """Synchronous install endpoint that streams progress."""
+    def generate():
+        try:
+            yield f"data: {json.dumps({'percent': 0, 'status': 'Connecting to download server...'})}\n\n"
+            
+            # We'll reimplement a simpler download here for streaming
+            from urllib.request import urlopen, Request
+            import zipfile
+            import tempfile
+            import shutil
+            
+            req = Request(FFmpegManager.FFMPEG_URL, headers={'User-Agent': 'FinFetcher/1.0'})
+            temp_dir = tempfile.mkdtemp()
+            zip_path = os.path.join(temp_dir, 'ffmpeg.zip')
+            
+            try:
+                with urlopen(req, timeout=120) as response:
+                    total_size = int(response.headers.get('Content-Length', 0))
+                    downloaded = 0
+                    chunk_size = 1024 * 64
+                    
+                    with open(zip_path, 'wb') as f:
+                        while True:
+                            chunk = response.read(chunk_size)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            
+                            if total_size > 0:
+                                percent = int((downloaded / total_size) * 70)
+                                size_mb = downloaded / (1024 * 1024)
+                                total_mb = total_size / (1024 * 1024)
+                                yield f"data: {json.dumps({'percent': percent, 'status': f'Downloading... {size_mb:.1f}/{total_mb:.1f} MB'})}\n\n"
+                
+                yield f"data: {json.dumps({'percent': 70, 'status': 'Extracting files...'})}\n\n"
+                
+                ffmpeg_dir = os.path.join(ffmpeg_manager.get_app_data_dir(), 'ffmpeg')
+                os.makedirs(ffmpeg_dir, exist_ok=True)
+                
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    bin_files = [n for n in zf.namelist() if '/bin/' in n and n.endswith('.exe')]
+                    total_files = len(bin_files)
+                    
+                    for i, name in enumerate(bin_files):
+                        filename = os.path.basename(name)
+                        if filename:
+                            percent = 70 + int((i / max(total_files, 1)) * 25)
+                            yield f"data: {json.dumps({'percent': percent, 'status': f'Extracting {filename}...'})}\n\n"
+                            
+                            with zf.open(name) as src, open(os.path.join(ffmpeg_dir, filename), 'wb') as dst:
+                                dst.write(src.read())
+                
+                yield f"data: {json.dumps({'percent': 95, 'status': 'Verifying installation...'})}\n\n"
+                
+                if ffmpeg_manager.is_installed():
+                    yield f"data: {json.dumps({'percent': 100, 'status': 'Installation complete!', 'success': True})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'percent': 0, 'status': 'Error: FFmpeg not found after extraction', 'success': False})}\n\n"
+                    
+            finally:
+                try:
+                    shutil.rmtree(temp_dir)
+                except:
+                    pass
+                    
+        except Exception as e:
+            yield f"data: {json.dumps({'percent': 0, 'status': f'Error: {str(e)}', 'success': False})}\n\n"
+    
+    return Response(generate(), mimetype='text/event-stream')
+
+
+@app.route('/api/setup/browse', methods=['POST'])
+def setup_browse():
+    """Set a custom ffmpeg path."""
+    data = request.json
+    path = data.get('path')
+    
+    if not path:
+        return jsonify({'success': False, 'error': 'No path provided'})
+    
+    if ffmpeg_manager.set_custom_path(path):
+        return jsonify({'success': True, 'path': path})
+    else:
+        return jsonify({'success': False, 'error': 'FFmpeg not found in the selected folder'})
+
+
+@app.route('/api/setup/exit', methods=['POST'])
+def setup_exit():
+    """Exit the application."""
+    def shutdown():
+        time.sleep(0.5)
+        os._exit(0)
+    threading.Thread(target=shutdown, daemon=True).start()
+    return jsonify({'success': True})
 
 
 def get_video_info(url, flat=True):

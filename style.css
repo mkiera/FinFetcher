@@ -894,3 +894,143 @@ input:checked+.slider:before {
 .debug-actions button {
     flex: 1;
 }
+
+/* === Setup Screen === */
+.setup-screen {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+    background: var(--bg-color);
+}
+
+.setup-container {
+    width: 90%;
+    max-width: 420px;
+    text-align: center;
+    animation: fadeIn 0.5s ease;
+}
+
+.setup-header h1 {
+    font-size: 2rem;
+    background: linear-gradient(to right, #8ED8E3, #6BC5D2);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 5px;
+}
+
+.setup-subtitle {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.9rem;
+    margin-bottom: 30px;
+}
+
+.setup-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 15px;
+}
+
+.setup-icon {
+    font-size: 3rem;
+    margin-bottom: 5px;
+}
+
+.setup-content h2 {
+    font-size: 1.3rem;
+    color: var(--accent-glow);
+    margin: 0;
+}
+
+.setup-description {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.9rem;
+    line-height: 1.5;
+    max-width: 300px;
+}
+
+.setup-progress {
+    width: 100%;
+    margin: 20px 0;
+}
+
+.setup-progress-bar {
+    width: 100%;
+    height: 8px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.setup-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #4A90A4, #6BC5D2);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.setup-status {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.85rem;
+    margin-top: 10px;
+}
+
+.setup-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    max-width: 280px;
+    margin-top: 10px;
+}
+
+.setup-buttons button.primary {
+    background: linear-gradient(135deg, #4A90A4, #2D6A8A);
+}
+
+.setup-buttons button.secondary {
+    background: rgba(255, 255, 255, 0.1);
+    box-shadow: none;
+}
+
+.setup-buttons button.secondary:hover {
+    background: rgba(255, 255, 255, 0.15);
+}
+
+.setup-buttons button.tertiary {
+    background: transparent;
+    box-shadow: none;
+    color: rgba(255, 255, 255, 0.5);
+    font-weight: 400;
+}
+
+.setup-buttons button.tertiary:hover {
+    color: rgba(255, 255, 255, 0.8);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.setup-note {
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 0.75rem;
+    margin-top: 15px;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}

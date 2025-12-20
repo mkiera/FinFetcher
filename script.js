@@ -9,9 +9,136 @@ let currentUrl = '';
 let videoDuration = 0;
 let cachedVideoInfo = null;
 
-// Initialize
-selectMode(currentMode);
-loadVersion();
+// Initialize - check for ffmpeg first
+checkSetup();
+
+async function checkSetup() {
+    try {
+        const response = await fetch('/api/setup/check');
+        const data = await response.json();
+
+        if (data.installed) {
+            // FFmpeg is installed, show main app
+            showMainApp();
+        } else {
+            // Show setup screen
+            showSetupScreen();
+        }
+    } catch (e) {
+        console.error('Setup check failed:', e);
+        // If check fails, try to show main app anyway
+        showMainApp();
+    }
+}
+
+function showSetupScreen() {
+    document.getElementById('setupScreen').classList.remove('hidden');
+    document.getElementById('mainContainer').classList.add('hidden');
+}
+
+function showMainApp() {
+    document.getElementById('setupScreen').classList.add('hidden');
+    document.getElementById('mainContainer').classList.remove('hidden');
+
+    // Initialize main app
+    selectMode(currentMode);
+    loadVersion();
+}
+
+async function installFFmpeg() {
+    const buttons = document.getElementById('setupButtons');
+    const progress = document.getElementById('setupProgress');
+    const progressFill = document.getElementById('setupProgressFill');
+    const status = document.getElementById('setupStatus');
+    const note = document.querySelector('.setup-note');
+
+    // Hide buttons, show progress
+    buttons.classList.add('hidden');
+    progress.classList.remove('hidden');
+    if (note) note.classList.add('hidden');
+
+    try {
+        const response = await fetch('/api/setup/install-sync', { method: 'POST' });
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n\n');
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.substring(6));
+
+                        // Update progress bar
+                        progressFill.style.width = data.percent + '%';
+                        status.textContent = data.status;
+
+                        // Check for completion
+                        if (data.success === true) {
+                            setTimeout(() => {
+                                showMainApp();
+                            }, 1000);
+                            return;
+                        } else if (data.success === false) {
+                            // Installation failed
+                            status.textContent = 'Installation failed. Please try again or browse manually.';
+                            status.style.color = '#ff6b6b';
+                            buttons.classList.remove('hidden');
+                            progress.classList.add('hidden');
+                            if (note) note.classList.remove('hidden');
+                            return;
+                        }
+                    } catch (e) {
+                        // Ignore JSON parse errors
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        console.error('Install error:', e);
+        status.textContent = 'Error: ' + e.message;
+        status.style.color = '#ff6b6b';
+        buttons.classList.remove('hidden');
+        progress.classList.add('hidden');
+        if (note) note.classList.remove('hidden');
+    }
+}
+
+async function browseFFmpeg() {
+    try {
+        const path = await window.pywebview.api.select_folder();
+        if (path) {
+            const response = await fetch('/api/setup/browse', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: path })
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                showMainApp();
+            } else {
+                alert(data.error || 'FFmpeg not found in selected folder. Please select a folder containing ffmpeg.exe');
+            }
+        }
+    } catch (e) {
+        console.error('Browse error:', e);
+        alert('Error selecting folder: ' + e.message);
+    }
+}
+
+async function exitApp() {
+    try {
+        await fetch('/api/setup/exit', { method: 'POST' });
+    } catch (e) {
+        // App should be closing
+    }
+}
 
 // Load version from version.txt
 async function loadVersion() {
