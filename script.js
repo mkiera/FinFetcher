@@ -1,12 +1,18 @@
+/**
+ * Aura Downloader v1.0.0
+ * Frontend JavaScript for YouTube/Music download application.
+ */
+
+// State
 let currentMode = 'video';
 let currentUrl = '';
 let videoDuration = 0;
-let cachedVideoInfo = null; // Cache to avoid refetching
+let cachedVideoInfo = null;
 
-// Select Default Mode
+// Initialize
 selectMode(currentMode);
 
-// Add listener for URL input to fetch duration
+// Fetch video info when URL input loses focus
 document.getElementById('urlInput').addEventListener('blur', async (e) => {
     const url = e.target.value.trim();
     if (url && url !== currentUrl) {
@@ -34,11 +40,7 @@ function toggleAdvanced() {
 function toggleTrimInputs() {
     const isChecked = document.getElementById('trimToggle').checked;
     const inputs = document.getElementById('trimInputs');
-    if (isChecked) {
-        inputs.classList.remove('hidden');
-    } else {
-        inputs.classList.add('hidden');
-    }
+    inputs.classList.toggle('hidden', !isChecked);
 }
 
 function log(message) {
@@ -69,13 +71,12 @@ async function fetchVideoInfo(url, preserveState = false) {
             initializeSlider();
         }
 
-        // Populate Quality Options
+        // Populate quality dropdown from available formats
         const qualitySelect = document.getElementById('qualitySelect');
         const previousValue = preserveState ? qualitySelect.value : null;
 
         qualitySelect.innerHTML = '<option value="max">Max (4K/8K)</option><option value="1080p">1080p Compatible</option>';
         if (data.formats && data.formats.length > 0) {
-            // Get unique heights >= 144p
             const heights = [...new Set(data.formats.map(f => f.height).filter(h => h && h >= 144))].sort((a, b) => b - a);
             if (heights.length > 0) {
                 qualitySelect.innerHTML = '<option value="max">Max (Best)</option>';
@@ -88,7 +89,7 @@ async function fetchVideoInfo(url, preserveState = false) {
             }
         }
 
-        // Restore selection if it exists in new options
+        // Restore previous selection if still available
         if (previousValue && Array.from(qualitySelect.options).some(o => o.value === previousValue)) {
             qualitySelect.value = previousValue;
         }
@@ -116,7 +117,7 @@ async function initiateDownload() {
     document.getElementById('downloadBtn').disabled = true;
     document.getElementById('downloadBtn').textContent = "Starting...";
 
-    // Use cached info if URL hasn't changed, otherwise fetch new
+    // Use cached info if URL hasn't changed
     let data = cachedVideoInfo;
     if (url !== currentUrl || !cachedVideoInfo) {
         currentUrl = url;
@@ -131,7 +132,7 @@ async function initiateDownload() {
             startDownload('single');
         }
     } else {
-        resetUI(); // Fetch failed
+        resetUI();
     }
 }
 
@@ -140,18 +141,18 @@ function confirmDownload(type) {
     startDownload(type);
 }
 
-// --- Trim Slider Logic ---
+// --- Trim Slider Functions ---
+
 function initializeSlider() {
     const rangeStart = document.getElementById('rangeStart');
     const rangeEnd = document.getElementById('rangeEnd');
 
     rangeStart.max = videoDuration;
     rangeEnd.max = videoDuration;
-
     rangeStart.value = 0;
     rangeEnd.value = videoDuration;
 
-    updateSlider(); // Initial sync
+    updateSlider();
 }
 
 function updateSlider(handle) {
@@ -160,7 +161,7 @@ function updateSlider(handle) {
     const startVal = parseInt(rangeStart.value);
     const endVal = parseInt(rangeEnd.value);
 
-    // Prevent crossing
+    // Prevent handles from crossing
     if (endVal < startVal) {
         if (handle === 'start') {
             rangeStart.value = endVal;
@@ -174,15 +175,14 @@ function updateSlider(handle) {
     const currentStart = parseInt(rangeStart.value);
     const currentEnd = parseInt(rangeEnd.value);
 
-    // Update Fill
+    // Update visual fill
     const fill = document.getElementById('sliderFill');
     const percentStart = ((currentStart - min) / (max - min)) * 100;
     const percentEnd = ((currentEnd - min) / (max - min)) * 100;
-
     fill.style.left = percentStart + "%";
     fill.style.width = (percentEnd - percentStart) + "%";
 
-    // Update Text Inputs
+    // Sync text inputs
     document.getElementById('trimStart').value = formatTime(currentStart);
     document.getElementById('trimEnd').value = formatTime(currentEnd);
 }
@@ -197,7 +197,7 @@ function updateFromText() {
     if (startSec !== null) document.getElementById('rangeStart').value = startSec;
     if (endSec !== null) document.getElementById('rangeEnd').value = endSec;
 
-    updateSlider(null); // Sync visual
+    updateSlider(null);
 }
 
 function formatTime(seconds) {
@@ -231,6 +231,8 @@ function parseTime(timeStr) {
     return seconds;
 }
 
+// --- Download Functions ---
+
 async function startDownload(type) {
     const progressArea = document.getElementById('progressArea');
     progressArea.classList.remove('hidden');
@@ -239,8 +241,7 @@ async function startDownload(type) {
     log(`Starting ${type} download...`);
     log(`Mode: ${currentMode}`);
 
-    // IMPORTANT: Collect Advanced Options BEFORE folder dialog
-    // The pywebview folder dialog can cause UI state to reset
+    // Collect options before folder dialog (pywebview can cause UI state issues)
     const logToFile = document.getElementById('logToggle').checked;
     const quality = document.getElementById('qualitySelect').value;
     const trim = document.getElementById('trimToggle').checked;
@@ -256,8 +257,6 @@ async function startDownload(type) {
             return;
         }
     }
-
-    const eventSource = new EventSource('/api/download-stream?dummy=avoid-cache');
 
     let savePath = null;
     const locationToggle = document.getElementById('locationToggle');
@@ -277,6 +276,7 @@ async function startDownload(type) {
         }
     }
 
+    // Start download request
     fetch('/api/download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -318,7 +318,7 @@ async function startDownload(type) {
                             resetUI();
                         }
                     } catch (e) {
-                        // ignore partial json
+                        // Ignore partial JSON
                     }
                 }
             }
@@ -332,19 +332,10 @@ async function startDownload(type) {
 function resetUI() {
     document.getElementById('downloadBtn').disabled = false;
     document.getElementById('downloadBtn').textContent = "Download";
-
-    // Ensure Trim Inputs stay visible if checked
     toggleTrimInputs();
 
-    // Preserve Advanced Options visibility (do not close it)
-    // No action needed - just don't touch advancedContent
-    // Force Advanced Options to be visible if it was open (or just ensure it's not hidden if user had it open)
-    // Since we don't track "was open" persistently across reloads (if reload happened), 
-    // we can explicitly check if we want it open. 
-    // BUT the text "Advanced Options" toggle logic relies on it.
-    // Let's just ensure the class is correct.
+    // Ensure Advanced Options visibility matches chevron state
     const advancedContent = document.getElementById('advancedContent');
-    // If the header arrow indicates open (▲), ensure content is shown
     const chevron = document.querySelector('.advanced-header .chevron');
     if (chevron.textContent === '▲') {
         advancedContent.classList.remove('hidden');

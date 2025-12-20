@@ -1,3 +1,9 @@
+/**
+ * Aura Downloader v1.0.0
+ * Premium glassmorphism UI styling
+ */
+
+/* === Variables === */
 :root {
     --bg-color: #0f0f13;
     --text-color: #ffffff;
@@ -8,17 +14,19 @@
     --font-main: 'Outfit', sans-serif;
 }
 
+/* === Reset === */
 * {
     box-sizing: border-box;
     margin: 0;
     padding: 0;
 }
 
-/* Utility Classes */
+/* === Utilities === */
 .hidden {
     display: none !important;
 }
 
+/* === Body === */
 body {
     background-color: var(--bg-color);
     color: var(--text-color);
@@ -31,7 +39,7 @@ body {
     position: relative;
 }
 
-/* Dynamic Background */
+/* === Animated Background === */
 .background-blobs {
     position: absolute;
     top: 0;
@@ -88,7 +96,7 @@ body {
     }
 }
 
-/* Layout */
+/* === Layout === */
 .container {
     width: 100%;
     max-width: 500px;
@@ -118,7 +126,15 @@ header p {
     letter-spacing: 1px;
 }
 
-/* Glass Card */
+.version {
+    display: block;
+    margin-top: 8px;
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.4);
+    letter-spacing: 2px;
+}
+
+/* === Glass Card === */
 .glass-panel {
     background: var(--glass-bg);
     backdrop-filter: blur(20px);
@@ -126,20 +142,17 @@ header p {
     border: 1px solid var(--glass-border);
     border-radius: 24px;
     padding: 40px;
-    /* Re-added increased padding */
-    /* Removed max-height and overflow-y to prevent scrollbar */
     display: flex;
     flex-direction: column;
 }
 
-/* Input */
+/* === Input === */
 .input-group {
     position: relative;
     margin-bottom: 25px;
     flex-shrink: 0;
 }
 
-/* URL Status Indicator */
 .status-indicator {
     text-align: center;
     padding: 8px 0;
@@ -164,13 +177,11 @@ input[type="text"]:focus {
     outline: none;
     border-color: var(--accent-glow);
     box-shadow: 0 0 15px rgba(157, 78, 221, 0.3);
-    /* transform: scale(1.02); Removed to prevent scrollbar issue */
 }
 
-/* Options */
+/* === Mode Selection === */
 .options-grid {
     display: flex;
-    /* Changed from grid to flex for centering */
     justify-content: center;
     gap: 15px;
     margin-bottom: 25px;
@@ -186,7 +197,6 @@ input[type="text"]:focus {
     cursor: pointer;
     transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
     min-width: 100px;
-    /* Ensure buttons are substantial */
 }
 
 .option-card:hover {
@@ -210,7 +220,7 @@ input[type="text"]:focus {
     font-weight: 500;
 }
 
-/* Button */
+/* === Button === */
 button {
     width: 100%;
     padding: 16px;
@@ -237,7 +247,7 @@ button:active {
     transform: scale(0.98);
 }
 
-/* Logs */
+/* === Log Container === */
 #progressArea {
     margin-top: 25px;
     padding-top: 20px;
@@ -254,29 +264,13 @@ button:active {
     flex-direction: column;
     gap: 5px;
     white-space: pre-wrap;
-    /* Force text wrapping */
     word-break: break-word;
-    /* Ensure long URLs break */
 }
 
 .log-entry {
-    /* No additional styling needed */
     display: block;
 }
 
-@keyframes fadeIn {
-    from {
-        opacity: 0;
-        transform: translateY(5px);
-    }
-
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-/* Scrollbar */
 .log-container::-webkit-scrollbar {
     width: 6px;
 }
@@ -286,16 +280,13 @@ button:active {
     border-radius: 3px;
 }
 
-/* Modal */
-/* Advanced Options */
+/* === Advanced Options === */
 .advanced-options {
     margin-bottom: 25px;
     background: rgba(255, 255, 255, 0.03);
     border-radius: 16px;
     overflow: visible;
-    /* Changed from 'hidden' to prevent clipping Quality/Trim sections */
     flex-shrink: 0;
-    /* Prevent flex compression */
 }
 
 .advanced-header {
@@ -316,7 +307,6 @@ button:active {
 .advanced-content {
     padding: 15px;
     border-top: 1px solid var(--glass-border);
-    /* animation: slideDown 0.3s ease; Removed to prevent rendering issues */
 }
 
 .toggle-row,
@@ -325,11 +315,10 @@ button:active {
     justify-content: space-between;
     align-items: center;
     margin-bottom: 20px;
-    /* Increased spacing */
     font-size: 0.9rem;
 }
 
-/* Small Switch */
+/* === Small Toggle Switch === */
 .switch.small {
     width: 40px;
     height: 20px;
@@ -346,7 +335,7 @@ button:active {
     transform: translateX(20px);
 }
 
-/* Select */
+/* === Select Dropdown === */
 select {
     background: rgba(0, 0, 0, 0.3);
     border: 1px solid var(--glass-border);
@@ -362,7 +351,7 @@ select:focus {
     border-color: var(--accent-glow);
 }
 
-/* Trim Inputs */
+/* === Trim Controls === */
 .trim-inputs {
     display: flex;
     flex-direction: column;
@@ -384,7 +373,7 @@ select:focus {
     text-align: center;
 }
 
-/* Dual Range Slider */
+/* === Dual Range Slider === */
 .slider-wrapper {
     position: relative;
     width: 100%;
@@ -425,7 +414,6 @@ select:focus {
     padding: 0;
     margin: 0;
     border: none;
-    /* Fix for glass border interfering */
 }
 
 .slider-wrapper input[type="range"]::-webkit-slider-thumb {
@@ -438,7 +426,6 @@ select:focus {
     cursor: pointer;
     box-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
     margin-top: -5px;
-    /* Adjust if needed */
 }
 
 .slider-wrapper input[type="range"]::-webkit-slider-runnable-track {
@@ -446,23 +433,7 @@ select:focus {
     height: 6px;
 }
 
-/* Animations */
-@keyframes slideDown {
-    from {
-        opacity: 0;
-        transform: translateY(-10px);
-    }
-
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-.hidden {
-    display: none !important;
-}
-
+/* === Modal === */
 .modal {
     position: fixed;
     top: 0;
@@ -513,7 +484,7 @@ select:focus {
     background: rgba(255, 255, 255, 0.2);
 }
 
-/* Toggle Switch */
+/* === Toggle Switch === */
 .toggle-container {
     display: flex;
     align-items: center;
@@ -580,4 +551,29 @@ input:checked+.slider:before {
 .toggle-label {
     font-size: 0.9rem;
     color: rgba(255, 255, 255, 0.8);
+}
+
+/* === Animations === */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(5px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
