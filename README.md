@@ -4,6 +4,13 @@ A friendly video & music downloader built with Python and PyWebView.
 
 ![FinFetcher](icon.png)
 
+## Screenshots
+
+<p align="center">
+  <img src="screenshots/screenshot-2.png" width="350" alt="FinFetcher - Default View"/>
+  <img src="screenshots/screenshot-1.png" width="350" alt="FinFetcher - Video Ready"/>
+</p>
+
 ## Features
 
 - 🎬 **Video Download** - Download videos in various qualities (up to 4K/8K)
