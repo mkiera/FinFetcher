@@ -1,6 +1,7 @@
 let currentMode = 'video';
 let currentUrl = '';
 let videoDuration = 0;
+let cachedVideoInfo = null; // Cache to avoid refetching
 
 // Select Default Mode
 selectMode(currentMode);
@@ -10,7 +11,7 @@ document.getElementById('urlInput').addEventListener('blur', async (e) => {
     const url = e.target.value.trim();
     if (url && url !== currentUrl) {
         currentUrl = url;
-        await fetchVideoInfo(url);
+        cachedVideoInfo = await fetchVideoInfo(url);
     }
 });
 
@@ -51,7 +52,7 @@ function log(message) {
 
 async function fetchVideoInfo(url, preserveState = false) {
     try {
-        document.getElementById('urlStatus').textContent = "⌛";
+        document.getElementById('urlStatus').textContent = "⌛ Fetching video info...";
         document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Retrieving video metadata...</div>";
 
         const response = await fetch('/api/info', {
@@ -92,12 +93,12 @@ async function fetchVideoInfo(url, preserveState = false) {
             qualitySelect.value = previousValue;
         }
 
-        document.getElementById('urlStatus').textContent = "✅";
+        document.getElementById('urlStatus').textContent = "✅ Ready to download";
         document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Ready to download! ✅</div>";
         return data;
     } catch (e) {
         console.error(e);
-        document.getElementById('urlStatus').textContent = "❌";
+        document.getElementById('urlStatus').textContent = "❌ Error fetching info";
         document.querySelector('#logContainer').innerHTML += `<div class='log-entry'>> Error: ${e.message}</div>`;
         return null;
     }
@@ -112,12 +113,16 @@ async function initiateDownload() {
         return;
     }
 
-    currentUrl = url;
     document.getElementById('downloadBtn').disabled = true;
-    document.getElementById('downloadBtn').textContent = "Checking...";
+    document.getElementById('downloadBtn').textContent = "Starting...";
 
-    // Check info (or reuse if we have it, but safest to fetch to be sure of playlist status)
-    const data = await fetchVideoInfo(url, true);
+    // Use cached info if URL hasn't changed, otherwise fetch new
+    let data = cachedVideoInfo;
+    if (url !== currentUrl || !cachedVideoInfo) {
+        currentUrl = url;
+        data = await fetchVideoInfo(url, true);
+        cachedVideoInfo = data;
+    }
 
     if (data) {
         if (data.is_playlist) {
@@ -236,7 +241,6 @@ async function startDownload(type) {
 
     // IMPORTANT: Collect Advanced Options BEFORE folder dialog
     // The pywebview folder dialog can cause UI state to reset
-    const sponsors = document.getElementById('sponsorToggle').checked;
     const logToFile = document.getElementById('logToggle').checked;
     const quality = document.getElementById('qualitySelect').value;
     const trim = document.getElementById('trimToggle').checked;
@@ -281,7 +285,6 @@ async function startDownload(type) {
             mode: currentMode,
             type: type,
             save_path: savePath,
-            sponsorblock: sponsors,
             log_to_file: logToFile,
             quality: quality,
             trim_start: trimStart,

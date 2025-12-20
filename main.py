@@ -62,7 +62,6 @@ def download():
     mode = data.get('mode', 'video') # video, audio, navidrome
     download_type = data.get('type', 'single') # single, playlist
     save_path = data.get('save_path') # Already handled
-    sponsorblock = data.get('sponsorblock', False)
     log_to_file = data.get('log_to_file', False) # New param
     quality = data.get('quality', 'max')
     trim_start = data.get('trim_start')
@@ -114,10 +113,6 @@ def download():
             '-f', format_spec,
             '--merge-output-format', 'mp4'
         ])
-    
-    
-    if sponsorblock:
-        cmd.extend(['--sponsorblock-remove', 'all'])
 
     # Remove yt-dlp trim args to download full video first
     # This prevents timestamp/keyframe issues associated with trimming during download
@@ -255,6 +250,6 @@ def download():
 
 if __name__ == '__main__':
     api = Api()
-    # Increased window size as requested
-    webview.create_window('Aura Downloader', app, js_api=api, width=700, height=900, resizable=True)
+    # Dynamic window size - taller to fit content without scrollbar
+    webview.create_window('Aura Downloader', app, js_api=api, width=700, height=1050, resizable=True)
     webview.start()

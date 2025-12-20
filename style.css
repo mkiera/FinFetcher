@@ -14,6 +14,11 @@
     padding: 0;
 }
 
+/* Utility Classes */
+.hidden {
+    display: none !important;
+}
+
 body {
     background-color: var(--bg-color);
     color: var(--text-color);
@@ -122,10 +127,7 @@ header p {
     border-radius: 24px;
     padding: 40px;
     /* Re-added increased padding */
-    overflow-y: auto;
-    /* Allow scrolling within the card if content expands */
-    max-height: 90vh;
-    /* Prevent card from going off-screen */
+    /* Removed max-height and overflow-y to prevent scrollbar */
     display: flex;
     flex-direction: column;
 }
@@ -135,6 +137,15 @@ header p {
     position: relative;
     margin-bottom: 25px;
     flex-shrink: 0;
+}
+
+/* URL Status Indicator */
+.status-indicator {
+    text-align: center;
+    padding: 8px 0;
+    font-size: 0.85rem;
+    color: rgba(255, 255, 255, 0.7);
+    min-height: 24px;
 }
 
 input[type="text"] {
@@ -249,7 +260,8 @@ button:active {
 }
 
 .log-entry {
-    /* animation: fadeIn 0.3s ease; Removed to prevent rendering issues */
+    /* No additional styling needed */
+    display: block;
 }
 
 @keyframes fadeIn {
@@ -280,7 +292,10 @@ button:active {
     margin-bottom: 25px;
     background: rgba(255, 255, 255, 0.03);
     border-radius: 16px;
-    overflow: hidden;
+    overflow: visible;
+    /* Changed from 'hidden' to prevent clipping Quality/Trim sections */
+    flex-shrink: 0;
+    /* Prevent flex compression */
 }
 
 .advanced-header {
