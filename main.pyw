@@ -4,10 +4,16 @@ A friendly video & music downloader desktop application.
 Built with Flask + PyWebView for native desktop experience.
 """
 
+
 import os
+import sys
 import json
 import subprocess
 import webview
+import threading
+import queue
+import time
+import yt_dlp
 from flask import Flask, request, jsonify, send_from_directory
 
 VERSION = "1.0.0"
@@ -30,24 +36,17 @@ def serve_static(path):
 
 
 def get_video_info(url, flat=True):
-    """Fetch video metadata using yt-dlp."""
-    cmd = ['yt-dlp', '-J']
-    if flat:
-        cmd.append('--flat-playlist')
-    cmd.append(url)
-    
-    # Hide console window on Windows
-    startupinfo = None
-    creationflags = 0
-    if os.name == 'nt':
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = subprocess.CREATE_NO_WINDOW
-    
-    result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo, creationflags=creationflags)
-    if result.returncode != 0:
-        raise Exception(result.stderr)
-    return json.loads(result.stdout)
+    """Fetch video metadata using yt-dlp Python API."""
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': flat,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+    except Exception as e:
+        raise Exception(str(e))
 
 
 def estimate_size(formats, quality='max'):
@@ -170,11 +169,7 @@ def get_debug_info():
     
     # Check yt-dlp
     try:
-        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True, 
-                              startupinfo=startupinfo, creationflags=creationflags, timeout=10)
-        debug_info['dependencies']['yt-dlp'] = result.stdout.strip() if result.returncode == 0 else f"Error: {result.stderr}"
-    except FileNotFoundError:
-        debug_info['dependencies']['yt-dlp'] = "NOT FOUND - yt-dlp is not installed or not in PATH"
+        debug_info['dependencies']['yt-dlp'] = yt_dlp.version.__version__
     except Exception as e:
         debug_info['dependencies']['yt-dlp'] = f"Error: {str(e)}"
     
@@ -197,44 +192,19 @@ def get_debug_info():
 
 @app.route('/api/debug/test', methods=['POST'])
 def run_debug_test():
-    """Run a diagnostic test with yt-dlp."""
+    """Run a diagnostic test with yt-dlp Python API."""
     data = request.json
     test_url = data.get('url', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ')  # Default test video
     
-    # Hide console window on Windows
-    startupinfo = None
-    creationflags = 0
-    if os.name == 'nt':
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        creationflags = subprocess.CREATE_NO_WINDOW
-    
     try:
-        result = subprocess.run(
-            ['yt-dlp', '--dump-json', '--no-download', test_url],
-            capture_output=True, text=True,
-            startupinfo=startupinfo, creationflags=creationflags,
-            timeout=30
-        )
-        
-        if result.returncode == 0:
+        ydl_opts = {'quiet': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(test_url, download=False)
             return jsonify({
                 'success': True,
                 'message': 'yt-dlp can fetch video info successfully!',
-                'title': json.loads(result.stdout).get('title', 'Unknown')
+                'title': info.get('title', 'Unknown')
             })
-        else:
-            return jsonify({
-                'success': False,
-                'message': 'yt-dlp failed',
-                'error': result.stderr
-            })
-    except subprocess.TimeoutExpired:
-        return jsonify({
-            'success': False,
-            'message': 'Timeout',
-            'error': 'Request timed out after 30 seconds'
-        })
     except Exception as e:
         return jsonify({
             'success': False,
@@ -245,7 +215,7 @@ def run_debug_test():
 
 @app.route('/api/download', methods=['POST'])
 def download():
-    """API endpoint to initiate download with yt-dlp."""
+    """API endpoint to initiate download with yt-dlp Python API."""
     data = request.json
     url = data.get('url')
     mode = data.get('mode', 'video')
@@ -259,10 +229,6 @@ def download():
     if not url:
         return jsonify({'error': 'No URL provided'}), 400
 
-    # Build yt-dlp command
-    cmd = ['yt-dlp', '--no-mtime']  # Keep current date/time instead of video upload date
-    cmd.extend(['--no-playlist'] if download_type == 'single' else ['--yes-playlist'])
-    
     # Set save path (default to Downloads folder)
     if not save_path:
         save_path = os.path.join(os.path.expanduser("~"), "Downloads")
@@ -271,11 +237,24 @@ def download():
 
     # Output template
     output_template = '%(title)s.%(ext)s' if mode == 'video' else '%(artist)s - %(title)s.%(ext)s'
-    cmd.extend(['--output', os.path.join(save_path, output_template)])
+    
+    # Configure yt-dlp options
+    ydl_opts = {
+        'outtmpl': os.path.join(save_path, output_template),
+        'updatetime': False,
+        'noplaylist': True if download_type == 'single' else False,
+    }
 
     # Mode-specific options
     if mode == 'audio':
-        cmd.extend(['-x', '--audio-format', 'mp3', '--audio-quality', '0'])
+        ydl_opts.update({
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '0',
+            }],
+        })
     else:
         # Video format selection with quality preference
         format_spec = 'bestvideo+bestaudio/best'
@@ -287,82 +266,112 @@ def download():
                 format_spec = f'bestvideo[height<={h}]+bestaudio/best[height<={h}]/best'
             except:
                 pass
-        cmd.extend(['-f', format_spec, '--merge-output-format', 'mp4'])
+        
+        ydl_opts.update({
+            'format': format_spec,
+            'merge_output_format': 'mp4',
+        })
 
-    cmd.extend(['--merge-output-format', 'mp4'])
-    cmd.append(url)
+    # Queues for communicating with thread
+    msg_queue = queue.Queue()
+    result_queue = queue.Queue()
     
-    # Run download with streaming output
+    def progress_hook(d):
+        """Callback for yt-dlp progress."""
+        if d['status'] == 'downloading':
+            try:
+                percent = d.get('_percent_str', '?').strip()
+                speed = d.get('_speed_str', '?').strip()
+                eta = d.get('_eta_str', '?').strip()
+                total = d.get('_total_bytes_str', d.get('_total_bytes_estimate_str', '?')).strip()
+                msg = f"[download] {percent} of {total} at {speed} ETA {eta}"
+                msg_queue.put({'log': msg})
+            except:
+                pass
+        elif d['status'] == 'finished':
+            filename = d.get('filename', 'Unknown')
+            msg_queue.put({'log': f"[download] Destination: {filename}"})
+            msg_queue.put({'log': "[download] Download completed processing"})
+            result_queue.put({'final_file': filename})
+
+    ydl_opts['progress_hooks'] = [progress_hook]
+
+    def run_download_thread():
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+            result_queue.put({'success': True})
+        except Exception as e:
+            result_queue.put({'success': False, 'error': str(e)})
+
     try:
         def generate():
-            environ = os.environ.copy()
-            environ["PYTHONDONTWRITEBYTECODE"] = "1"
-            
-            # Hide console window on Windows
-            startupinfo = None
-            creationflags = 0
-            if os.name == 'nt':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                creationflags = subprocess.CREATE_NO_WINDOW
-            
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                env=environ,
-                startupinfo=startupinfo,
-                creationflags=creationflags
-            )
+            # Start download thread
+            t = threading.Thread(target=run_download_thread, daemon=True)
+            t.start()
             
             final_file = None
-            
-            # Stream output to frontend
-            while True:
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
-                    break
-                if line:
-                    line_content = line.strip()
-                    yield f"data: {json.dumps({'log': line_content})}\n\n"
-                    
-                    # Capture final filename from yt-dlp output
-                    if '[Merger] Merging formats into' in line:
-                        parts = line.split('into')
-                        if len(parts) > 1:
-                            final_file = parts[1].strip().strip('"')
-                    elif '[download] Destination:' in line:
-                        parts = line.split('Destination:')
-                        if len(parts) > 1 and not final_file:
-                            final_file = parts[1].strip()
-                    elif 'Already downloaded:' in line:
-                        parts = line.split('Already downloaded:')
-                        if len(parts) > 1:
-                            final_file = parts[1].strip()
-                    
-                    # Optional: log to file
-                    if log_to_file:
-                        try:
-                            log_path = os.path.join(save_path, "download_log.txt")
-                            with open(log_path, "a", encoding="utf-8") as f:
-                                f.write(line_content + "\n")
-                        except:
-                            pass
+            download_success = False
 
-            process.wait()
+            # Monitor progress
+            while True:
+                # 1. Yield any logs from queue
+                try:
+                    while True:
+                        msg = msg_queue.get_nowait()
+                        yield f"data: {json.dumps(msg)}\n\n"
+                        
+                        # Optional: log to file
+                        if log_to_file:
+                            try:
+                                log_path = os.path.join(save_path, "download_log.txt")
+                                with open(log_path, "a", encoding="utf-8") as f:
+                                    f.write(msg.get('log', '') + "\n")
+                            except:
+                                pass
+                except queue.Empty:
+                    pass
+
+                # 2. Check if thread finished
+                if not t.is_alive() and msg_queue.empty():
+                    break
+                
+                # 3. Check for specific result updates (filename, success)
+                try:
+                    while True:
+                        res = result_queue.get_nowait()
+                        if 'final_file' in res:
+                            final_file = res['final_file']
+                        if 'success' in res:
+                            download_success = res['success']
+                            if not res['success']:
+                                yield f"data: {json.dumps({'error': res.get('error')})}\n\n"
+                except queue.Empty:
+                    pass
+                
+                # Avoid busy wait
+                time.sleep(0.1)
+
+            # Ensure thread is joined
+            t.join(timeout=1)
             
             # Post-download trimming (if requested)
-            if process.returncode == 0 and trim_start and trim_end and final_file:
+            if download_success and trim_start and trim_end and final_file:
                 try:
                     yield f"data: {json.dumps({'log': f'> [Aura] Trimming video from {trim_start} to {trim_end}...'})}\n\n"
                     
                     base, ext = os.path.splitext(final_file)
                     trimmed_file = f"{base}_trimmed{ext}"
                     
-                    # FFmpeg precise trim with re-encoding for accuracy
+                    # Hide console window on Windows
+                    startupinfo = None
+                    creationflags = 0
+                    if os.name == 'nt':
+                        startupinfo = subprocess.STARTUPINFO()
+                        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                        creationflags = subprocess.CREATE_NO_WINDOW
+
+                    # FFmpeg precise trim
                     ffmpeg_cmd = [
                         'ffmpeg', '-y',
                         '-i', final_file,
@@ -373,6 +382,9 @@ def download():
                         '-strict', 'experimental',
                         trimmed_file
                     ]
+                    
+                    environ = os.environ.copy()
+                    environ["PYTHONDONTWRITEBYTECODE"] = "1"
                     
                     trim_proc = subprocess.Popen(
                         ffmpeg_cmd,
@@ -407,10 +419,11 @@ def download():
                     yield f"data: {json.dumps({'log': f'> [Aura] Trim error: {e}'})}\n\n"
             
             # Send final status
-            if process.returncode == 0:
+            if download_success:
                 yield f"data: {json.dumps({'status': 'completed'})}\n\n"
             else:
-                yield f"data: {json.dumps({'error': 'Download failed'})}\n\n"
+                 # Error already sent above
+                 pass
                  
         return Flask.response_class(generate(), mimetype='text/event-stream')
 
