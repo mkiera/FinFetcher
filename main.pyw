@@ -512,6 +512,64 @@ def download():
 
 
 if __name__ == '__main__':
+    # Get icon path (works for both dev and bundled exe)
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    # Try .ico first (better Windows compatibility), then .png
+    icon_path = os.path.join(base_path, 'icon.ico')
+    if not os.path.exists(icon_path):
+        icon_path = os.path.join(base_path, 'icon.png')
+    if not os.path.exists(icon_path):
+        icon_path = None
+    
+    def set_window_icon():
+        """Set window icon on Windows using ctypes (workaround for script mode)."""
+        if os.name != 'nt' or icon_path is None:
+            return
+        try:
+            import ctypes
+            
+            # Windows API constants
+            WM_SETICON = 0x0080
+            ICON_SMALL = 0
+            ICON_BIG = 1
+            IMAGE_ICON = 1
+            LR_LOADFROMFILE = 0x0010
+            LR_DEFAULTSIZE = 0x0040
+            
+            user32 = ctypes.windll.user32
+            
+            # Load icon from file
+            hIcon = user32.LoadImageW(
+                None, icon_path, IMAGE_ICON, 0, 0,
+                LR_LOADFROMFILE | LR_DEFAULTSIZE
+            )
+            
+            if hIcon:
+                # Find window with retries
+                hwnd = None
+                for _ in range(10):
+                    hwnd = user32.FindWindowW(None, "FinFetcher")
+                    if hwnd:
+                        break
+                    time.sleep(0.1)
+                
+                if hwnd:
+                    user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hIcon)
+                    user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hIcon)
+        except Exception:
+            pass  # Silently fail if icon can't be set
+    
     api = Api()
-    webview.create_window('FinFetcher', app, js_api=api, width=700, height=1200, resizable=True)
+    window = webview.create_window('FinFetcher', app, js_api=api, width=700, height=1200, resizable=True)
+    
+    # Set icon when window is shown
+    def on_shown():
+        time.sleep(0.3)
+        set_window_icon()
+    
+    window.events.shown += on_shown
     webview.start()

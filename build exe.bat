@@ -53,12 +53,14 @@ echo [1/3] Building EXE (this may take a few minutes)...
 echo       Including bundled ffmpeg...
 echo.
 
-REM Build with PyInstaller - include ffmpeg folder
+REM Build with PyInstaller - include ffmpeg folder and icon
 py -m PyInstaller --onefile --windowed --name %EXE_NAME% --distpath %OUTPUT_DIR% ^
+    --icon "icon.ico" ^
     --add-data "index.html;." ^
     --add-data "style.css;." ^
     --add-data "script.js;." ^
     --add-data "version.txt;." ^
+    --add-data "icon.ico;." ^
     --add-data "ffmpeg;ffmpeg" ^
     --clean --noconfirm main.pyw
 
