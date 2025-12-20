@@ -2,7 +2,9 @@
 
 A friendly video & music downloader built with Python and PyWebView.
 
-![FinFetcher](icon.png)
+<p align="center">
+  <img src="icon.png" width="128" alt="FinFetcher"/>
+</p>
 
 ## Screenshots
 
