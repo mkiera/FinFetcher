@@ -3,3 +3,8 @@ __pycache__/
 *$py.class
 download_log.txt
 debug_params_v2.txt
+
+# PyInstaller
+build/
+dist/
+*.spec
