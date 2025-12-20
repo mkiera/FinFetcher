@@ -11,6 +11,18 @@ let cachedVideoInfo = null;
 
 // Initialize
 selectMode(currentMode);
+loadVersion();
+
+// Load version from version.txt
+async function loadVersion() {
+    try {
+        const response = await fetch('/version.txt');
+        const version = (await response.text()).trim();
+        document.getElementById('versionDisplay').textContent = `v${version} · Made by Kiera`;
+    } catch (e) {
+        document.getElementById('versionDisplay').textContent = 'v1.0.0 · Made by Kiera';
+    }
+}
 
 // Fetch video info when URL input loses focus
 document.getElementById('urlInput').addEventListener('blur', async (e) => {
