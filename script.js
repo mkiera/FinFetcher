@@ -68,6 +68,7 @@ async function fetchVideoInfo(url, preserveState = false) {
     try {
         document.getElementById('urlStatus').textContent = "⌛ Fetching video info...";
         document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Retrieving video metadata...</div>";
+        document.getElementById('previewPanel').classList.add('hidden');
 
         const response = await fetch('/api/info', {
             method: 'POST',
@@ -106,6 +107,9 @@ async function fetchVideoInfo(url, preserveState = false) {
             qualitySelect.value = previousValue;
         }
 
+        // Populate preview panel
+        populatePreviewPanel(data);
+
         document.getElementById('urlStatus').textContent = "✅ Ready to download";
         document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Ready to download! ✅</div>";
         return data;
@@ -113,8 +117,72 @@ async function fetchVideoInfo(url, preserveState = false) {
         console.error(e);
         document.getElementById('urlStatus').textContent = "❌ Error fetching info";
         document.querySelector('#logContainer').innerHTML += `<div class='log-entry'>> Error: ${e.message}</div>`;
+        document.getElementById('previewPanel').classList.add('hidden');
         return null;
     }
+}
+
+function populatePreviewPanel(data) {
+    const panel = document.getElementById('previewPanel');
+    const thumb = document.getElementById('previewThumb');
+    const title = document.getElementById('previewTitle');
+    const singleVideoMeta = document.getElementById('singleVideoMeta');
+    const duration = document.getElementById('previewDuration');
+    const size = document.getElementById('previewSize');
+    const playlistDropdown = document.getElementById('playlistDropdown');
+    const singleVideoOptions = document.getElementById('singleVideoOptions');
+
+    // Set thumbnail
+    if (data.thumbnail) {
+        thumb.src = data.thumbnail;
+        thumb.style.display = 'block';
+    } else {
+        thumb.style.display = 'none';
+    }
+
+    // Set title
+    title.textContent = data.title || 'Unknown Title';
+
+    // Handle playlist vs single video
+    if (data.is_playlist && data.entries) {
+        // Playlist mode
+        singleVideoMeta.classList.add('hidden');
+        playlistDropdown.classList.remove('hidden');
+        document.getElementById('playlistCount').textContent = `${data.entries_count} videos in playlist`;
+
+        // Disable Quality and Trim for playlists
+        singleVideoOptions.classList.add('disabled-for-playlist');
+
+        // Populate playlist entries
+        const entriesContainer = document.getElementById('playlistEntries');
+        entriesContainer.innerHTML = '';
+
+        data.entries.forEach((entry, index) => {
+            const entryEl = document.createElement('div');
+            entryEl.className = 'playlist-entry';
+            entryEl.innerHTML = `
+                <div class="playlist-entry-header">
+                    <span class="playlist-entry-title">${index + 1}. ${entry.title}</span>
+                    <span class="playlist-entry-duration">${formatTime(entry.duration || 0)}</span>
+                </div>
+            `;
+            entriesContainer.appendChild(entryEl);
+        });
+    } else {
+        // Single video mode
+        singleVideoMeta.classList.remove('hidden');
+        playlistDropdown.classList.add('hidden');
+
+        // Enable Quality and Trim for single videos
+        singleVideoOptions.classList.remove('disabled-for-playlist');
+
+        // Set duration and size
+        duration.textContent = formatTime(data.duration || 0);
+        size.textContent = data.size_formatted || '~Unknown';
+    }
+
+    // Show panel
+    panel.classList.remove('hidden');
 }
 
 async function initiateDownload() {

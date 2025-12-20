@@ -29,6 +29,30 @@
                 <div class="status-indicator" id="urlStatus"></div>
             </div>
 
+            <!-- Video Preview Panel -->
+            <div id="previewPanel" class="preview-panel hidden">
+                <div class="preview-header">
+                    <img id="previewThumb" class="preview-thumb" src="" alt="">
+                    <div class="preview-info">
+                        <h3 id="previewTitle">Video Title</h3>
+                        <!-- Duration/Size only for single videos -->
+                        <div id="singleVideoMeta" class="preview-meta">
+                            <span id="previewDuration">0:00</span>
+                            <span class="separator">·</span>
+                            <span id="previewSize">~0 MB</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Playlist Dropdown (only shown for playlists) -->
+                <details id="playlistDropdown" class="playlist-dropdown hidden">
+                    <summary id="playlistCount">3 videos in playlist</summary>
+                    <div id="playlistEntries" class="playlist-entries">
+                        <!-- Dynamically populated -->
+                    </div>
+                </details>
+            </div>
+
             <div class="options-grid">
                 <div class="option-card" data-mode="video" onclick="selectMode('video')">
                     <div class="icon">🎬</div>
@@ -56,57 +80,59 @@
                         </label>
                     </div>
 
-                    <div class="control-row">
-                        <span>Quality</span>
-                        <select id="qualitySelect">
-                            <option value="max">Max (4K/8K)</option>
-                            <option value="1080p">1080p Compatible</option>
-                        </select>
-                    </div>
-
-                    <div class="control-row">
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="trimToggle" onchange="toggleTrimInputs()">
-                            <span>Trim Video</span>
-                        </label>
-                    </div>
-
-                    <div id="trimInputs" class="trim-inputs hidden">
-                        <div class="slider-wrapper">
-                            <div class="slider-track"></div>
-                            <div class="slider-fill" id="sliderFill"></div>
-                            <input type="range" id="rangeStart" min="0" max="100" value="0" step="1"
-                                oninput="updateSlider('start')">
-                            <input type="range" id="rangeEnd" min="0" max="100" value="100" step="1"
-                                oninput="updateSlider('end')">
+                    <!-- These options are disabled for playlists -->
+                    <div id="singleVideoOptions">
+                        <div class="control-row" id="qualityRow">
+                            <span>Quality</span>
+                            <select id="qualitySelect">
+                                <option value="max">Max (4K/8K)</option>
+                                <option value="1080p">1080p Compatible</option>
+                            </select>
                         </div>
 
-                        <div class="time-inputs-row">
-                            <input type="text" id="trimStart" placeholder="00:00" class="time-input"
-                                onchange="updateFromText()">
-                            <span>to</span>
-                            <input type="text" id="trimEnd" placeholder="End" class="time-input"
-                                onchange="updateFromText()">
+                        <div class="control-row" id="trimRow">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="trimToggle" onchange="toggleTrimInputs()">
+                                <span>Trim Video</span>
+                            </label>
+                        </div>
+
+                        <div id="trimInputs" class="trim-inputs hidden">
+                            <div class="slider-wrapper">
+                                <div class="slider-track"></div>
+                                <div class="slider-fill" id="sliderFill"></div>
+                                <input type="range" id="rangeStart" min="0" max="100" value="0" step="1"
+                                    oninput="updateSlider('start')">
+                                <input type="range" id="rangeEnd" min="0" max="100" value="100" step="1"
+                                    oninput="updateSlider('end')">
+                            </div>
+
+                            <div class="time-inputs-row">
+                                <input type="text" id="trimStart" placeholder="00:00" class="time-input"
+                                    onchange="updateFromText()">
+                                <span>to</span>
+                                <input type="text" id="trimEnd" placeholder="End" class="time-input"
+                                    onchange="updateFromText()">
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
 
-            <div class="toggle-container">
-                <label class="switch">
-                    <input type="checkbox" id="locationToggle">
-                    <span class="slider round"></span>
-                </label>
-                <span class="toggle-label">Ask for Download Location</span>
-            </div>
-
-            <button id="downloadBtn" onclick="initiateDownload()">Download</button>
-
-            <div id="progressArea" class="hidden">
-                <div class="log-container" id="logContainer">
-                    <div class="log-entry">Ready to download...</div>
+                <div class="toggle-container">
+                    <label class="switch">
+                        <input type="checkbox" id="locationToggle">
+                        <span class="slider round"></span>
+                    </label>
+                    <span class="toggle-label">Ask for Download Location</span>
                 </div>
-            </div>
+
+                <button id="downloadBtn" onclick="initiateDownload()">Download</button>
+
+                <div id="progressArea" class="hidden">
+                    <div class="log-container" id="logContainer">
+                        <div class="log-entry">Ready to download...</div>
+                    </div>
+                </div>
         </main>
     </div>
 

@@ -29,34 +29,103 @@ def serve_static(path):
     return send_from_directory('.', path)
 
 
-def get_video_info(url):
+def get_video_info(url, flat=True):
     """Fetch video metadata using yt-dlp."""
-    cmd = ['yt-dlp', '-J', '--flat-playlist', url]
+    cmd = ['yt-dlp', '-J']
+    if flat:
+        cmd.append('--flat-playlist')
+    cmd.append(url)
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise Exception(result.stderr)
     return json.loads(result.stdout)
 
 
+def estimate_size(formats, quality='max'):
+    """Estimate download size from format info."""
+    if not formats:
+        return None
+    
+    # Try to find best matching format
+    best_video = None
+    best_audio = None
+    
+    for f in formats:
+        if f.get('vcodec') and f.get('vcodec') != 'none':
+            if not best_video or (f.get('height', 0) or 0) > (best_video.get('height', 0) or 0):
+                best_video = f
+        if f.get('acodec') and f.get('acodec') != 'none' and not f.get('vcodec'):
+            if not best_audio or (f.get('abr', 0) or 0) > (best_audio.get('abr', 0) or 0):
+                best_audio = f
+    
+    total = 0
+    if best_video and best_video.get('filesize'):
+        total += best_video['filesize']
+    if best_audio and best_audio.get('filesize'):
+        total += best_audio['filesize']
+    
+    return total if total > 0 else None
+
+
+def format_size(bytes_size):
+    """Format bytes to human readable string."""
+    if not bytes_size:
+        return "Unknown"
+    if bytes_size < 1024 * 1024:
+        return f"{bytes_size / 1024:.1f} KB"
+    elif bytes_size < 1024 * 1024 * 1024:
+        return f"{bytes_size / (1024 * 1024):.1f} MB"
+    else:
+        return f"{bytes_size / (1024 * 1024 * 1024):.2f} GB"
+
+
 @app.route('/api/info', methods=['POST'])
 def get_info():
-    """API endpoint to fetch video/playlist metadata."""
+    """API endpoint to fetch video/playlist metadata with detailed info."""
     data = request.json
     url = data.get('url')
     if not url:
         return jsonify({'error': 'No URL provided'}), 400
     
     try:
-        info = get_video_info(url)
+        info = get_video_info(url, flat=True)
         is_playlist = 'entries' in info or info.get('_type') == 'playlist'
         
-        return jsonify({
+        # Base response
+        response = {
             'title': info.get('title', 'Unknown Title'),
             'duration': info.get('duration', 0),
+            'thumbnail': info.get('thumbnail', ''),
             'is_playlist': is_playlist,
             'formats': info.get('formats', []),
-            'entries_count': len(info.get('entries', [])) if is_playlist else 1
-        })
+        }
+        
+        # Estimate size for single video
+        if not is_playlist:
+            size = estimate_size(info.get('formats', []))
+            response['size'] = size
+            response['size_formatted'] = format_size(size)
+            response['entries_count'] = 1
+        else:
+            # For playlists, return entry info
+            entries = info.get('entries', [])
+            response['entries_count'] = len(entries)
+            response['entries'] = []
+            total_size = 0
+            
+            for entry in entries[:50]:  # Limit to 50 for performance
+                entry_info = {
+                    'id': entry.get('id', ''),
+                    'title': entry.get('title', 'Unknown'),
+                    'duration': entry.get('duration', 0),
+                    'thumbnail': entry.get('thumbnail', ''),
+                }
+                response['entries'].append(entry_info)
+            
+            response['size'] = None
+            response['size_formatted'] = "Varies per video"
+        
+        return jsonify(response)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
