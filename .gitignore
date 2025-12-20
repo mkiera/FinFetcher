@@ -8,3 +8,6 @@ debug_params_v2.txt
 build/
 dist/
 *.spec
+
+# FFmpeg binaries (download separately for builds)
+ffmpeg/

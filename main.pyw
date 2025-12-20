@@ -16,6 +16,56 @@ import time
 import yt_dlp
 from flask import Flask, request, jsonify, send_from_directory
 
+
+def get_ffmpeg_path():
+    """Get the path to the bundled ffmpeg executable."""
+    # Check if running as PyInstaller bundle
+    if getattr(sys, 'frozen', False):
+        # Running as bundled exe
+        base_path = sys._MEIPASS
+    else:
+        # Running in development
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    ffmpeg_name = 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg'
+    ffmpeg_path = os.path.join(base_path, 'ffmpeg', ffmpeg_name)
+    
+    # Fallback to system ffmpeg if bundled version not found
+    if not os.path.exists(ffmpeg_path):
+        return 'ffmpeg'
+    
+    return ffmpeg_path
+
+
+def get_ffprobe_path():
+    """Get the path to the bundled ffprobe executable."""
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    ffprobe_name = 'ffprobe.exe' if os.name == 'nt' else 'ffprobe'
+    ffprobe_path = os.path.join(base_path, 'ffmpeg', ffprobe_name)
+    
+    if not os.path.exists(ffprobe_path):
+        return 'ffprobe'
+    
+    return ffprobe_path
+
+
+def get_ffmpeg_dir():
+    """Get the directory containing ffmpeg binaries."""
+    if getattr(sys, 'frozen', False):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    ffmpeg_dir = os.path.join(base_path, 'ffmpeg')
+    
+    if os.path.exists(ffmpeg_dir):
+        return ffmpeg_dir
+    return None
+
 class Api:
     """PyWebView API for native dialog access."""
     def select_folder(self):
@@ -172,8 +222,9 @@ def get_debug_info():
         debug_info['dependencies']['yt-dlp'] = f"Error: {str(e)}"
     
     # Check ffmpeg
+    ffmpeg_exe = get_ffmpeg_path()
     try:
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True,
+        result = subprocess.run([ffmpeg_exe, '-version'], capture_output=True, text=True,
                               startupinfo=startupinfo, creationflags=creationflags, timeout=10)
         if result.returncode == 0:
             first_line = result.stdout.split('\n')[0] if result.stdout else 'Unknown'
@@ -237,11 +288,16 @@ def download():
     output_template = '%(title)s.%(ext)s' if mode == 'video' else '%(artist)s - %(title)s.%(ext)s'
     
     # Configure yt-dlp options
+    ffmpeg_dir = get_ffmpeg_dir()
     ydl_opts = {
         'outtmpl': os.path.join(save_path, output_template),
         'updatetime': False,
         'noplaylist': True if download_type == 'single' else False,
     }
+    
+    # Set ffmpeg location if bundled
+    if ffmpeg_dir:
+        ydl_opts['ffmpeg_location'] = ffmpeg_dir
 
     # Mode-specific options
     if mode == 'audio':
@@ -395,8 +451,9 @@ def download():
                         creationflags = subprocess.CREATE_NO_WINDOW
 
                     # FFmpeg precise trim
+                    ffmpeg_exe = get_ffmpeg_path()
                     ffmpeg_cmd = [
-                        'ffmpeg', '-y',
+                        ffmpeg_exe, '-y',
                         '-i', final_file,
                         '-ss', trim_start,
                         '-to', trim_end,
