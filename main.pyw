@@ -420,5 +420,5 @@ def download():
 
 if __name__ == '__main__':
     api = Api()
-    webview.create_window('FinFetcher', app, js_api=api, width=700, height=1050, resizable=True)
+    webview.create_window('FinFetcher', app, js_api=api, width=700, height=1200, resizable=True)
     webview.start()
