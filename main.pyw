@@ -139,6 +139,110 @@ def get_info():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/debug', methods=['GET'])
+def get_debug_info():
+    """API endpoint for debugging - returns system info and dependency versions."""
+    import platform
+    import sys
+    
+    # Hide console window on Windows
+    startupinfo = None
+    creationflags = 0
+    if os.name == 'nt':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        creationflags = subprocess.CREATE_NO_WINDOW
+    
+    debug_info = {
+        'system': {
+            'os': platform.system(),
+            'os_version': platform.version(),
+            'platform': platform.platform(),
+            'python_version': sys.version,
+            'python_executable': sys.executable,
+        },
+        'dependencies': {},
+        'paths': {
+            'cwd': os.getcwd(),
+            'downloads': os.path.join(os.path.expanduser("~"), "Downloads"),
+        }
+    }
+    
+    # Check yt-dlp
+    try:
+        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True, 
+                              startupinfo=startupinfo, creationflags=creationflags, timeout=10)
+        debug_info['dependencies']['yt-dlp'] = result.stdout.strip() if result.returncode == 0 else f"Error: {result.stderr}"
+    except FileNotFoundError:
+        debug_info['dependencies']['yt-dlp'] = "NOT FOUND - yt-dlp is not installed or not in PATH"
+    except Exception as e:
+        debug_info['dependencies']['yt-dlp'] = f"Error: {str(e)}"
+    
+    # Check ffmpeg
+    try:
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True,
+                              startupinfo=startupinfo, creationflags=creationflags, timeout=10)
+        if result.returncode == 0:
+            first_line = result.stdout.split('\n')[0] if result.stdout else 'Unknown'
+            debug_info['dependencies']['ffmpeg'] = first_line
+        else:
+            debug_info['dependencies']['ffmpeg'] = f"Error: {result.stderr}"
+    except FileNotFoundError:
+        debug_info['dependencies']['ffmpeg'] = "NOT FOUND - ffmpeg is not installed or not in PATH"
+    except Exception as e:
+        debug_info['dependencies']['ffmpeg'] = f"Error: {str(e)}"
+    
+    return jsonify(debug_info)
+
+
+@app.route('/api/debug/test', methods=['POST'])
+def run_debug_test():
+    """Run a diagnostic test with yt-dlp."""
+    data = request.json
+    test_url = data.get('url', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ')  # Default test video
+    
+    # Hide console window on Windows
+    startupinfo = None
+    creationflags = 0
+    if os.name == 'nt':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        creationflags = subprocess.CREATE_NO_WINDOW
+    
+    try:
+        result = subprocess.run(
+            ['yt-dlp', '--dump-json', '--no-download', test_url],
+            capture_output=True, text=True,
+            startupinfo=startupinfo, creationflags=creationflags,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            return jsonify({
+                'success': True,
+                'message': 'yt-dlp can fetch video info successfully!',
+                'title': json.loads(result.stdout).get('title', 'Unknown')
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'yt-dlp failed',
+                'error': result.stderr
+            })
+    except subprocess.TimeoutExpired:
+        return jsonify({
+            'success': False,
+            'message': 'Timeout',
+            'error': 'Request timed out after 30 seconds'
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': 'Exception',
+            'error': str(e)
+        })
+
+
 @app.route('/api/download', methods=['POST'])
 def download():
     """API endpoint to initiate download with yt-dlp."""

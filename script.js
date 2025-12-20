@@ -115,6 +115,7 @@ async function fetchVideoInfo(url, preserveState = false) {
         return data;
     } catch (e) {
         console.error(e);
+        recordError(e.message);
         document.getElementById('urlStatus').textContent = "❌ Your seal couldn't find that";
         document.querySelector('#logContainer').innerHTML += `<div class='log-entry'>> Your seal couldn't find that: ${e.message}</div>`;
         document.getElementById('previewPanel').classList.add('hidden');
@@ -420,4 +421,105 @@ function resetUI() {
     if (chevron.textContent === '▲') {
         advancedContent.classList.remove('hidden');
     }
+}
+
+// --- Debug Panel ---
+
+let lastError = null;
+
+// Keyboard shortcut: Ctrl+Shift+D
+document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey && e.key === 'D') {
+        e.preventDefault();
+        toggleDebug();
+    }
+});
+
+function toggleDebug() {
+    const panel = document.getElementById('debugPanel');
+    const isHidden = panel.classList.contains('hidden');
+
+    if (isHidden) {
+        panel.classList.remove('hidden');
+        loadDebugInfo();
+    } else {
+        panel.classList.add('hidden');
+    }
+}
+
+async function loadDebugInfo() {
+    try {
+        const response = await fetch('/api/debug');
+        const data = await response.json();
+
+        // System Info
+        const sysInfo = data.system;
+        document.getElementById('debugSystemInfo').textContent =
+            `OS: ${sysInfo.os} ${sysInfo.os_version}\n` +
+            `Platform: ${sysInfo.platform}\n` +
+            `Python: ${sysInfo.python_version.split(' ')[0]}\n` +
+            `Python Path: ${sysInfo.python_executable}`;
+
+        // Dependencies
+        const deps = data.dependencies;
+        document.getElementById('debugDependencies').textContent =
+            `yt-dlp: ${deps['yt-dlp']}\n` +
+            `ffmpeg: ${deps['ffmpeg']}`;
+
+        // Last error
+        if (lastError) {
+            document.getElementById('debugLastError').textContent = lastError;
+        }
+
+    } catch (e) {
+        document.getElementById('debugSystemInfo').textContent = `Error loading debug info: ${e.message}`;
+    }
+}
+
+async function runDiagnostic() {
+    const resultEl = document.getElementById('debugTestResult');
+    resultEl.textContent = '🔄 Running diagnostic test...';
+
+    try {
+        const response = await fetch('/api/debug/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            resultEl.textContent = `✅ SUCCESS!\n${data.message}\nVideo: "${data.title}"`;
+        } else {
+            resultEl.textContent = `❌ FAILED: ${data.message}\n\nError:\n${data.error}`;
+        }
+    } catch (e) {
+        resultEl.textContent = `❌ Request failed: ${e.message}`;
+    }
+}
+
+function copyDebugInfo() {
+    const sysInfo = document.getElementById('debugSystemInfo').textContent;
+    const deps = document.getElementById('debugDependencies').textContent;
+    const testResult = document.getElementById('debugTestResult').textContent;
+    const lastErr = document.getElementById('debugLastError').textContent;
+
+    const fullInfo = `=== FinFetcher Debug Info ===\n\n` +
+        `--- System ---\n${sysInfo}\n\n` +
+        `--- Dependencies ---\n${deps}\n\n` +
+        `--- Test Result ---\n${testResult || 'Not run'}\n\n` +
+        `--- Last Error ---\n${lastErr}`;
+
+    navigator.clipboard.writeText(fullInfo).then(() => {
+        alert('Debug info copied to clipboard!');
+    }).catch(() => {
+        // Fallback for older browsers
+        console.log(fullInfo);
+        alert('Could not copy. Check console for debug info.');
+    });
+}
+
+// Track errors globally
+function recordError(message) {
+    lastError = `[${new Date().toLocaleTimeString()}] ${message}`;
 }

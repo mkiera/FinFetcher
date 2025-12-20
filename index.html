@@ -161,6 +161,40 @@
         </div>
     </div>
 
+    <!-- Debug Panel (Ctrl+Shift+D to toggle) -->
+    <div id="debugPanel" class="modal hidden">
+        <div class="modal-content glass-panel debug-modal">
+            <h2>🔧 Debug Panel</h2>
+            <p class="debug-hint">Press Ctrl+Shift+D to close</p>
+
+            <div class="debug-section">
+                <h3>System Info</h3>
+                <div id="debugSystemInfo" class="debug-output">Loading...</div>
+            </div>
+
+            <div class="debug-section">
+                <h3>Dependency Versions</h3>
+                <div id="debugDependencies" class="debug-output">Loading...</div>
+            </div>
+
+            <div class="debug-section">
+                <h3>Test yt-dlp</h3>
+                <button onclick="runDiagnostic()" class="secondary">Run Diagnostic Test</button>
+                <div id="debugTestResult" class="debug-output"></div>
+            </div>
+
+            <div class="debug-section">
+                <h3>Last Error</h3>
+                <div id="debugLastError" class="debug-output">No errors recorded</div>
+            </div>
+
+            <div class="debug-actions">
+                <button onclick="copyDebugInfo()" class="secondary">Copy All Info</button>
+                <button onclick="toggleDebug()" class="primary">Close</button>
+            </div>
+        </div>
+    </div>
+
     <script src="script.js"></script>
 </body>
 
