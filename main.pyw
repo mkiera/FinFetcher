@@ -35,7 +35,16 @@ def get_video_info(url, flat=True):
     if flat:
         cmd.append('--flat-playlist')
     cmd.append(url)
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    # Hide console window on Windows
+    startupinfo = None
+    creationflags = 0
+    if os.name == 'nt':
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        creationflags = subprocess.CREATE_NO_WINDOW
+    
+    result = subprocess.run(cmd, capture_output=True, text=True, startupinfo=startupinfo, creationflags=creationflags)
     if result.returncode != 0:
         raise Exception(result.stderr)
     return json.loads(result.stdout)
@@ -147,7 +156,7 @@ def download():
         return jsonify({'error': 'No URL provided'}), 400
 
     # Build yt-dlp command
-    cmd = ['yt-dlp']
+    cmd = ['yt-dlp', '--no-mtime']  # Keep current date/time instead of video upload date
     cmd.extend(['--no-playlist'] if download_type == 'single' else ['--yes-playlist'])
     
     # Set save path (default to Downloads folder)
@@ -185,6 +194,14 @@ def download():
             environ = os.environ.copy()
             environ["PYTHONDONTWRITEBYTECODE"] = "1"
             
+            # Hide console window on Windows
+            startupinfo = None
+            creationflags = 0
+            if os.name == 'nt':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                creationflags = subprocess.CREATE_NO_WINDOW
+            
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -192,7 +209,9 @@ def download():
                 text=True,
                 encoding='utf-8',
                 errors='replace',
-                env=environ
+                env=environ,
+                startupinfo=startupinfo,
+                creationflags=creationflags
             )
             
             final_file = None
@@ -258,7 +277,9 @@ def download():
                         text=True,
                         encoding='utf-8',
                         errors='replace',
-                        env=environ
+                        env=environ,
+                        startupinfo=startupinfo,
+                        creationflags=creationflags
                     )
                     
                     for tline in trim_proc.stdout:
