@@ -66,8 +66,8 @@ function log(message) {
 
 async function fetchVideoInfo(url, preserveState = false) {
     try {
-        document.getElementById('urlStatus').textContent = "⌛ Fetching video info...";
-        document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Retrieving video metadata...</div>";
+        document.getElementById('urlStatus').textContent = "🦭 Your seal is fetching...";
+        document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Your seal is diving for metadata...</div>";
         document.getElementById('previewPanel').classList.add('hidden');
 
         const response = await fetch('/api/info', {
@@ -115,8 +115,8 @@ async function fetchVideoInfo(url, preserveState = false) {
         return data;
     } catch (e) {
         console.error(e);
-        document.getElementById('urlStatus').textContent = "❌ Error fetching info";
-        document.querySelector('#logContainer').innerHTML += `<div class='log-entry'>> Error: ${e.message}</div>`;
+        document.getElementById('urlStatus').textContent = "❌ Your seal couldn't find that";
+        document.querySelector('#logContainer').innerHTML += `<div class='log-entry'>> Your seal couldn't find that: ${e.message}</div>`;
         document.getElementById('previewPanel').classList.add('hidden');
         return null;
     }
