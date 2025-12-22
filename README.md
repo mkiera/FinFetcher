@@ -1,6 +1,7 @@
 # 🦭 FinFetcher
 
-A friendly video & music downloader built with Python and PyWebView.
+A video & music downloader built with Python and PyWebView.
+Supports hundreds of sites!
 
 <p align="center">
   <img src="icon.png" width="128" alt="FinFetcher"/>
@@ -19,13 +20,12 @@ A friendly video & music downloader built with Python and PyWebView.
 - 🎵 **Audio Extraction** - Extract audio as MP3
 - ✂️ **Video Trimming** - Trim videos to specific timestamps
 - 📂 **Playlist Support** - Download entire playlists
-- 🎨 **Modern UI** - Beautiful glassmorphism design
 
 ## Download
 
 Get the latest release from the [Releases](../../releases) page.
 
-**First Run:** FFmpeg will be automatically downloaded and installed (~30MB) on first launch.
+**First Run:** FFmpeg will be automatically downloaded and installed on first launch.
 
 <!--
 ## Development Setup
