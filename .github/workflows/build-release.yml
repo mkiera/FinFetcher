@@ -34,11 +34,10 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           if [[ "$VERSION" == *"-beta"* ]]; then
             echo "IS_BETA=true" >> $GITHUB_OUTPUT
-            echo "RELEASE_NAME=FinFetcher v$VERSION (Beta)" >> $GITHUB_OUTPUT
           else
             echo "IS_BETA=false" >> $GITHUB_OUTPUT
-            echo "RELEASE_NAME=FinFetcher v$VERSION" >> $GITHUB_OUTPUT
           fi
+          echo "RELEASE_NAME=FinFetcher v$VERSION" >> $GITHUB_OUTPUT
       
       - name: Build EXE
         run: |
@@ -58,7 +57,7 @@ jobs:
             
             ### Installation
             1. Download `FinFetcher_v${{ steps.version.outputs.VERSION }}.exe`
-            2. Run the exe - FFmpeg will be installed automatically on first launch
+            2. Run the exe - Dependencies will be installed automatically on first launch
             3. Start downloading! 🎬🎵
           files: dist/FinFetcher_v${{ steps.version.outputs.VERSION }}.exe
           draft: false
