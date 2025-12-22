@@ -32,7 +32,8 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          if [[ "$VERSION" == *"-beta"* ]]; then
+          # Detect beta: matches patterns like 1.0.1b, 1.0.1b-streaming, 1.0.1-beta
+          if [[ "$VERSION" =~ [0-9]b(-|$) ]] || [[ "$VERSION" == *"-beta"* ]]; then
             echo "IS_BETA=true" >> $GITHUB_OUTPUT
           else
             echo "IS_BETA=false" >> $GITHUB_OUTPUT
