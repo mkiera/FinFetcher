@@ -168,6 +168,18 @@ function selectMode(mode) {
             card.classList.add('selected');
         }
     });
+
+    // Hide advanced options for stream mode (no download settings needed)
+    const advancedOptions = document.querySelector('.advanced-options');
+    const downloadBtn = document.getElementById('downloadBtn');
+
+    if (mode === 'stream') {
+        advancedOptions.style.display = 'none';
+        downloadBtn.textContent = 'Stream';
+    } else {
+        advancedOptions.style.display = '';
+        downloadBtn.textContent = 'Download';
+    }
 }
 
 function toggleAdvanced() {
@@ -319,6 +331,12 @@ async function initiateDownload() {
 
     if (!url) {
         alert("Please enter a YouTube URL");
+        return;
+    }
+
+    // Handle stream mode separately
+    if (currentMode === 'stream') {
+        startStream(url);
         return;
     }
 
@@ -548,6 +566,86 @@ function resetUI() {
     if (chevron.textContent === '▲') {
         advancedContent.classList.remove('hidden');
     }
+
+    // Restore button text based on mode
+    document.getElementById('downloadBtn').textContent = currentMode === 'stream' ? 'Stream' : 'Download';
+}
+
+// --- Streaming Functions ---
+
+async function startStream(url) {
+    const streamModal = document.getElementById('streamModal');
+    const streamTitle = document.getElementById('streamTitle');
+    const streamPlayer = document.getElementById('streamPlayer');
+    const streamStatus = document.getElementById('streamStatus');
+    const downloadBtn = document.getElementById('downloadBtn');
+
+    // Show modal immediately with loading state
+    streamModal.classList.remove('hidden');
+    streamTitle.textContent = 'Loading...';
+    streamStatus.textContent = '🦭 Your seal is fetching the stream...';
+    streamStatus.className = 'stream-status loading';
+    streamPlayer.src = '';
+
+    downloadBtn.disabled = true;
+    downloadBtn.textContent = 'Streaming...';
+
+    try {
+        const response = await fetch('/api/stream', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: url })
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+            throw new Error(data.error);
+        }
+
+        // Set video source and title
+        streamTitle.textContent = data.title || 'Video';
+        streamPlayer.src = data.stream_url;
+        streamStatus.textContent = '';
+        streamStatus.className = 'stream-status';
+
+        // Handle video errors
+        streamPlayer.onerror = () => {
+            streamStatus.textContent = '❌ Playback error. Try a different video or download instead.';
+            streamStatus.className = 'stream-status error';
+        };
+
+        // Reset button when video starts
+        streamPlayer.onplay = () => {
+            downloadBtn.disabled = false;
+            downloadBtn.textContent = 'Stream';
+        };
+
+    } catch (e) {
+        console.error('Stream error:', e);
+        recordError(e.message);
+        streamTitle.textContent = 'Stream Error';
+        streamStatus.textContent = `❌ ${e.message}`;
+        streamStatus.className = 'stream-status error';
+        downloadBtn.disabled = false;
+        downloadBtn.textContent = 'Stream';
+    }
+}
+
+function closeStream() {
+    const streamModal = document.getElementById('streamModal');
+    const streamPlayer = document.getElementById('streamPlayer');
+
+    // Stop and clear video
+    streamPlayer.pause();
+    streamPlayer.src = '';
+
+    // Hide modal
+    streamModal.classList.add('hidden');
+
+    // Reset button
+    document.getElementById('downloadBtn').disabled = false;
+    document.getElementById('downloadBtn').textContent = 'Stream';
 }
 
 // --- Debug Panel ---

@@ -1034,3 +1034,82 @@ input:checked+.slider:before {
         transform: translateY(0);
     }
 }
+
+/* === Streaming Player Modal === */
+.stream-modal {
+    max-width: 800px;
+    width: 95%;
+    padding: 20px;
+}
+
+.stream-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 15px;
+}
+
+.stream-header h2 {
+    font-size: 1.1rem;
+    color: white;
+    margin: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    margin-right: 15px;
+}
+
+.stream-close-btn {
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    padding: 0;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    color: white;
+    font-size: 1.2rem;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    box-shadow: none;
+}
+
+.stream-close-btn:hover {
+    background: rgba(255, 100, 100, 0.3);
+    transform: none;
+}
+
+.stream-player-wrapper {
+    position: relative;
+    width: 100%;
+    border-radius: 12px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.stream-player-wrapper video {
+    width: 100%;
+    max-height: 450px;
+    display: block;
+    background: black;
+}
+
+.stream-status {
+    margin-top: 10px;
+    font-size: 0.85rem;
+    color: rgba(255, 255, 255, 0.6);
+    text-align: center;
+    min-height: 20px;
+}
+
+.stream-status.error {
+    color: #ff6b6b;
+}
+
+.stream-status.loading {
+    color: var(--accent-glow);
+}

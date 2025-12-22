@@ -545,6 +545,69 @@ def run_debug_test():
         })
 
 
+@app.route('/api/stream', methods=['POST'])
+def get_stream_url():
+    """Get direct stream URL for video playback without downloading."""
+    data = request.json
+    url = data.get('url')
+    
+    if not url:
+        return jsonify({'error': 'No URL provided'}), 400
+    
+    try:
+        # Configure yt-dlp to get streamable URL
+        # Prefer formats with both video+audio in single stream for HTML5 compatibility
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'format': 'best[ext=mp4]/best',  # Prefer mp4 for browser compatibility
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            # Get the direct URL
+            stream_url = info.get('url')
+            
+            # If no direct URL, try to get from requested_formats
+            if not stream_url and info.get('requested_formats'):
+                # For merged formats, we need to find a single stream format
+                # Fall back to finding a format with both video and audio
+                formats = info.get('formats', [])
+                
+                # Find best format with both video and audio
+                best_combined = None
+                for f in formats:
+                    has_video = f.get('vcodec') and f.get('vcodec') != 'none'
+                    has_audio = f.get('acodec') and f.get('acodec') != 'none'
+                    is_mp4 = f.get('ext') == 'mp4'
+                    
+                    if has_video and has_audio:
+                        if not best_combined:
+                            best_combined = f
+                        elif is_mp4 and best_combined.get('ext') != 'mp4':
+                            best_combined = f
+                        elif (f.get('height', 0) or 0) > (best_combined.get('height', 0) or 0):
+                            if is_mp4 or best_combined.get('ext') != 'mp4':
+                                best_combined = f
+                
+                if best_combined:
+                    stream_url = best_combined.get('url')
+            
+            if not stream_url:
+                return jsonify({'error': 'Could not find streamable URL'}), 400
+            
+            return jsonify({
+                'stream_url': stream_url,
+                'title': info.get('title', 'Unknown'),
+                'duration': info.get('duration', 0),
+                'thumbnail': info.get('thumbnail', '')
+            })
+            
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/download', methods=['POST'])
 def download():
     """API endpoint to initiate download with yt-dlp Python API."""

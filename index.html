@@ -119,6 +119,10 @@
                     <div class="icon">🎵</div>
                     <span>Audio</span>
                 </div>
+                <div class="option-card" data-mode="stream" onclick="selectMode('stream')">
+                    <div class="icon">▶️</div>
+                    <span>Stream</span>
+                </div>
             </div>
 
             <div class="advanced-options">
@@ -236,6 +240,20 @@
                 <button onclick="copyDebugInfo()" class="secondary">Copy All Info</button>
                 <button onclick="toggleDebug()" class="primary">Close</button>
             </div>
+        </div>
+    </div>
+
+    <!-- Streaming Player Modal -->
+    <div id="streamModal" class="modal hidden">
+        <div class="modal-content glass-panel stream-modal">
+            <div class="stream-header">
+                <h2 id="streamTitle">Loading...</h2>
+                <button class="stream-close-btn" onclick="closeStream()">✕</button>
+            </div>
+            <div class="stream-player-wrapper">
+                <video id="streamPlayer" controls autoplay playsinline></video>
+            </div>
+            <div class="stream-status" id="streamStatus"></div>
         </div>
     </div>
 
