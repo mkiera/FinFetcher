@@ -26,33 +26,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pywebview flask yt-dlp
       
-      - name: Get version from tag
-        id: get_version
+      - name: Get version info
+        id: version
         shell: bash
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          if [[ "$VERSION" == *"-beta"* ]]; then
+            echo "IS_BETA=true" >> $GITHUB_OUTPUT
+            echo "RELEASE_NAME=FinFetcher v$VERSION (Beta)" >> $GITHUB_OUTPUT
+          else
+            echo "IS_BETA=false" >> $GITHUB_OUTPUT
+            echo "RELEASE_NAME=FinFetcher v$VERSION" >> $GITHUB_OUTPUT
+          fi
       
       - name: Build EXE
         run: |
-          python -m PyInstaller --onefile --windowed --name "FinFetcher_v${{ steps.get_version.outputs.VERSION }}" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
+          python -m PyInstaller --onefile --windowed --name "FinFetcher_v${{ steps.version.outputs.VERSION }}" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          name: FinFetcher v${{ steps.get_version.outputs.VERSION }}
+          name: ${{ steps.version.outputs.RELEASE_NAME }}
           body: |
-            ## FinFetcher v${{ steps.get_version.outputs.VERSION }}
+            ## ${{ steps.version.outputs.RELEASE_NAME }}
             
-            🦭 A friendly video & music downloader.
+            🦭 A video & music downloader.
             
             ### What's New
             - See commit history for changes
             
             ### Installation
-            1. Download `FinFetcher_v${{ steps.get_version.outputs.VERSION }}.exe`
+            1. Download `FinFetcher_v${{ steps.version.outputs.VERSION }}.exe`
             2. Run the exe - FFmpeg will be installed automatically on first launch
             3. Start downloading! 🎬🎵
-          files: dist/FinFetcher_v${{ steps.get_version.outputs.VERSION }}.exe
+          files: dist/FinFetcher_v${{ steps.version.outputs.VERSION }}.exe
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.version.outputs.IS_BETA == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,52 @@
+name: Build Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_name:
+        description: 'Build name suffix (e.g., streaming-test)'
+        required: false
+        default: 'test'
+  push:
+    branches:
+      - 'feature/**'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller pywebview flask yt-dlp
+      
+      - name: Get build name
+        id: build_name
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "NAME=${{ github.event.inputs.build_name }}" >> $GITHUB_OUTPUT
+          else
+            BRANCH_NAME=${GITHUB_REF#refs/heads/feature/}
+            echo "NAME=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Build EXE
+        run: |
+          python -m PyInstaller --onefile --windowed --name "FinFetcher_${{ steps.build_name.outputs.NAME }}" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
+      
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FinFetcher_${{ steps.build_name.outputs.NAME }}
+          path: dist/FinFetcher_${{ steps.build_name.outputs.NAME }}.exe
+          retention-days: 30
