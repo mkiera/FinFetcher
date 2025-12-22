@@ -27,6 +27,7 @@ Get the latest release from the [Releases](../../releases) page.
 
 **First Run:** FFmpeg will be automatically downloaded and installed (~30MB) on first launch.
 
+<!--
 ## Development Setup
 
 1. Install Python 3.11+
@@ -51,6 +52,7 @@ build exe.bat
 ```
 build zip.bat
 ```
+-->
 
 ## License
 
