@@ -178,22 +178,23 @@
                         </div>
                     </div>
                 </div>
+            </div>
 
-                <div class="toggle-container">
-                    <label class="switch">
-                        <input type="checkbox" id="locationToggle">
-                        <span class="slider round"></span>
-                    </label>
-                    <span class="toggle-label">Ask for Download Location</span>
+            <div class="toggle-container" id="downloadLocationToggle">
+                <label class="switch">
+                    <input type="checkbox" id="locationToggle">
+                    <span class="slider round"></span>
+                </label>
+                <span class="toggle-label">Ask for Download Location</span>
+            </div>
+
+            <button id="downloadBtn" onclick="initiateDownload()">Download</button>
+
+            <div id="progressArea" class="hidden">
+                <div class="log-container" id="logContainer">
+                    <div class="log-entry">Ready to download...</div>
                 </div>
-
-                <button id="downloadBtn" onclick="initiateDownload()">Download</button>
-
-                <div id="progressArea" class="hidden">
-                    <div class="log-container" id="logContainer">
-                        <div class="log-entry">Ready to download...</div>
-                    </div>
-                </div>
+            </div>
         </main>
     </div>
 

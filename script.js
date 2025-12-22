@@ -169,15 +169,18 @@ function selectMode(mode) {
         }
     });
 
-    // Hide advanced options for stream mode (no download settings needed)
+    // Hide advanced options and download location toggle for stream mode
     const advancedOptions = document.querySelector('.advanced-options');
+    const downloadLocationToggle = document.getElementById('downloadLocationToggle');
     const downloadBtn = document.getElementById('downloadBtn');
 
     if (mode === 'stream') {
         advancedOptions.style.display = 'none';
+        if (downloadLocationToggle) downloadLocationToggle.style.display = 'none';
         downloadBtn.textContent = 'Stream';
     } else {
         advancedOptions.style.display = '';
+        if (downloadLocationToggle) downloadLocationToggle.style.display = '';
         downloadBtn.textContent = 'Download';
     }
 }
