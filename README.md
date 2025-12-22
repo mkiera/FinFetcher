@@ -25,8 +25,6 @@ Supports hundreds of sites!
 
 Get the latest release from the [Releases](../../releases) page.
 
-**First Run:** FFmpeg will be automatically downloaded and installed on first launch.
-
 <!--
 ## Development Setup
 
