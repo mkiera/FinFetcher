@@ -29,7 +29,15 @@ jobs:
       - name: Get version from tag
         id: get_version
         shell: bash
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          # Check if this is a prerelease (contains b, beta, alpha, rc)
+          if [[ "$VERSION" =~ (alpha|beta|b|rc) ]]; then
+            echo "IS_PRERELEASE=true" >> $GITHUB_OUTPUT
+          else
+            echo "IS_PRERELEASE=false" >> $GITHUB_OUTPUT
+          fi
       
       - name: Build EXE
         run: |
@@ -53,6 +61,7 @@ jobs:
             3. Start downloading! 🎬🎵
           files: dist/FinFetcher_v${{ steps.get_version.outputs.VERSION }}.exe
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.get_version.outputs.IS_PRERELEASE == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
