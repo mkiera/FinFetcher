@@ -18,6 +18,7 @@ Supports hundreds of sites!
 
 - 🎬 **Video Download** - Download videos in various qualities (up to 4K/8K)
 - 🎵 **Audio Extraction** - Extract audio as MP3
+- ▶️ **Stream Playback** - Watch videos directly without downloading
 - ✂️ **Video Trimming** - Trim videos to specific timestamps
 - 📂 **Playlist Support** - Download entire playlists
 
