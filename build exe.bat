@@ -10,10 +10,10 @@ REM Read version from version.txt
 set /p VERSION=<version.txt
 
 REM Check for PyInstaller
-py -m PyInstaller --version >nul 2>&1
+py -3.13 -m PyInstaller --version >nul 2>&1
 if errorlevel 1 (
     echo [INFO] Installing PyInstaller...
-    py -m pip install pyinstaller
+    py -3.13 -m pip install pyinstaller
 )
 
 REM Set output path
@@ -26,7 +26,7 @@ echo       FFmpeg will be auto-downloaded on first run.
 echo.
 
 REM Build with PyInstaller - no ffmpeg bundled (auto-downloads on first run)
-py -m PyInstaller --onefile --windowed --name %EXE_NAME% --distpath %OUTPUT_DIR% ^
+py -3.13 -m PyInstaller --onefile --windowed --name %EXE_NAME% --distpath %OUTPUT_DIR% ^
     --icon "icon.ico" ^
     --add-data "index.html;." ^
     --add-data "style.css;." ^

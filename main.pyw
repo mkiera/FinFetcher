@@ -798,16 +798,43 @@ def download():
 
                     # FFmpeg precise trim
                     ffmpeg_exe = get_ffmpeg_path()
-                    ffmpeg_cmd = [
-                        ffmpeg_exe, '-y',
-                        '-i', final_file,
-                        '-ss', trim_start,
-                        '-to', trim_end,
-                        '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
-                        '-c:a', 'aac', '-b:a', '192k',
-                        '-strict', 'experimental',
-                        trimmed_file
-                    ]
+                    
+                    # Detect if this is an audio-only file (MP3) or video
+                    is_audio_file = ext.lower() in ['.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus']
+                    
+                    if is_audio_file:
+                        # Audio-only trimming - use appropriate audio codec
+                        if ext.lower() == '.mp3':
+                            audio_codec = ['-c:a', 'libmp3lame', '-b:a', '192k']
+                        elif ext.lower() in ['.m4a', '.aac']:
+                            audio_codec = ['-c:a', 'aac', '-b:a', '192k']
+                        elif ext.lower() == '.flac':
+                            audio_codec = ['-c:a', 'flac']
+                        elif ext.lower() == '.opus':
+                            audio_codec = ['-c:a', 'libopus', '-b:a', '128k']
+                        elif ext.lower() == '.ogg':
+                            audio_codec = ['-c:a', 'libvorbis', '-q:a', '5']
+                        else:
+                            audio_codec = ['-c:a', 'copy']  # WAV or unknown - just copy
+                        
+                        ffmpeg_cmd = [
+                            ffmpeg_exe, '-y',
+                            '-i', final_file,
+                            '-ss', trim_start,
+                            '-to', trim_end,
+                        ] + audio_codec + [trimmed_file]
+                    else:
+                        # Video trimming - use video and audio codecs
+                        ffmpeg_cmd = [
+                            ffmpeg_exe, '-y',
+                            '-i', final_file,
+                            '-ss', trim_start,
+                            '-to', trim_end,
+                            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+                            '-c:a', 'aac', '-b:a', '192k',
+                            '-strict', 'experimental',
+                            trimmed_file
+                        ]
                     
                     environ = os.environ.copy()
                     environ["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -858,6 +885,15 @@ def download():
 
 
 if __name__ == '__main__':
+    # Set AppUserModelID for proper taskbar icon (must be done before window creation)
+    # This prevents Windows from showing Python's icon in the taskbar
+    if os.name == 'nt':
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('FinFetcher.App.1')
+        except Exception:
+            pass
+    
     # Get icon path (works for both dev and bundled exe)
     if getattr(sys, 'frozen', False):
         base_path = sys._MEIPASS
