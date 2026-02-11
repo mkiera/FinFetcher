@@ -366,6 +366,134 @@ def setup_exit():
     return jsonify({'success': True})
 
 
+_cookie_opts_cache = None
+
+def _get_python_exe():
+    """Get the path to python.exe (not pythonw.exe) for subprocess calls."""
+    exe = sys.executable
+    if exe.lower().endswith('pythonw.exe'):
+        # Replace pythonw.exe with python.exe
+        candidate = exe[:-len('pythonw.exe')] + 'python.exe'
+        if os.path.exists(candidate):
+            return candidate
+    return exe
+
+def _extract_cookies_via_subprocess(browser):
+    """Extract cookies from a Chromium browser via python.exe subprocess.
+    
+    On Windows, pythonw.exe can't access DPAPI for Chrome/Edge cookie decryption.
+    Using python.exe in a subprocess works because it has proper console context.
+    Saves cookies to a Netscape-format cookies.txt file.
+    Returns the path to the cookies file, or None on failure.
+    """
+    cookies_dir = os.path.join(FFmpegManager.get_app_data_dir(), 'cookies')
+    os.makedirs(cookies_dir, exist_ok=True)
+    cookies_file = os.path.join(cookies_dir, f'{browser}_cookies.txt')
+    
+    # Python script to extract cookies and save to file
+    script = f'''
+import sys
+try:
+    import yt_dlp
+    ydl_opts = {{
+        'cookiesfrombrowser': ('{browser}',),
+        'quiet': True,
+        'no_warnings': True,
+    }}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.cookiejar.save('{cookies_file.replace(chr(92), chr(92)*2)}', ignore_discard=True, ignore_expires=True)
+    print('OK')
+except Exception as e:
+    print(f'FAIL:{{e}}', file=sys.stderr)
+    sys.exit(1)
+'''
+    
+    try:
+        python_exe = _get_python_exe()
+        
+        # Hide console window on Windows
+        startupinfo = None
+        creationflags = 0
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            creationflags = subprocess.CREATE_NO_WINDOW
+        
+        result = subprocess.run(
+            [python_exe, '-c', script],
+            capture_output=True, text=True, timeout=30,
+            startupinfo=startupinfo, creationflags=creationflags,
+        )
+        
+        if result.returncode == 0 and os.path.exists(cookies_file):
+            return cookies_file
+    except Exception:
+        pass
+    
+    return None
+
+def get_cookie_opts():
+    """Get yt-dlp cookie options for YouTube authentication.
+    
+    Tries to extract cookies from an installed browser to bypass
+    YouTube's bot detection (403 Forbidden errors).
+    On Windows, Chromium cookies are extracted via a python.exe subprocess
+    to work around DPAPI failures in pythonw.exe.
+    Result is cached for the lifetime of the app.
+    """
+    global _cookie_opts_cache
+    if _cookie_opts_cache is not None:
+        return _cookie_opts_cache
+    
+    # On Windows, Chromium browsers need subprocess extraction due to DPAPI
+    chromium_browsers = ['chrome', 'edge', 'brave', 'opera']
+    non_chromium = ['firefox']
+    
+    if os.name == 'nt':
+        # Try non-Chromium first (no DPAPI), then Chromium via subprocess
+        for browser in non_chromium:
+            try:
+                test_opts = {
+                    'cookiesfrombrowser': (browser,),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extract_flat': True,
+                }
+                with yt_dlp.YoutubeDL(test_opts) as ydl:
+                    ydl.extract_info('https://www.youtube.com/watch?v=jNQXAC9IVRw', download=False)
+                    _cookie_opts_cache = {'cookiesfrombrowser': (browser,)}
+                    return _cookie_opts_cache
+            except Exception:
+                continue
+        
+        # Try Chromium browsers via subprocess
+        for browser in chromium_browsers:
+            cookies_file = _extract_cookies_via_subprocess(browser)
+            if cookies_file:
+                _cookie_opts_cache = {'cookiefile': cookies_file}
+                return _cookie_opts_cache
+    else:
+        # Non-Windows: try all browsers directly
+        for browser in chromium_browsers + non_chromium:
+            try:
+                test_opts = {
+                    'cookiesfrombrowser': (browser,),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extract_flat': True,
+                }
+                with yt_dlp.YoutubeDL(test_opts) as ydl:
+                    ydl.extract_info('https://www.youtube.com/watch?v=jNQXAC9IVRw', download=False)
+                    _cookie_opts_cache = {'cookiesfrombrowser': (browser,)}
+                    return _cookie_opts_cache
+            except Exception:
+                continue
+    
+    # No browser cookies available — proceed without them
+    _cookie_opts_cache = {}
+    return _cookie_opts_cache
+
+
 def get_video_info(url, flat=True):
     """Fetch video metadata using yt-dlp Python API."""
     ydl_opts = {
@@ -373,6 +501,7 @@ def get_video_info(url, flat=True):
         'no_warnings': True,
         'extract_flat': flat,
     }
+    ydl_opts.update(get_cookie_opts())
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
@@ -530,6 +659,7 @@ def run_debug_test():
     
     try:
         ydl_opts = {'quiet': True}
+        ydl_opts.update(get_cookie_opts())
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(test_url, download=False)
             return jsonify({
@@ -562,6 +692,7 @@ def get_stream_url():
             'no_warnings': True,
             'format': 'best[ext=mp4]/best',  # Prefer mp4 for browser compatibility
         }
+        ydl_opts.update(get_cookie_opts())
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -640,6 +771,7 @@ def download():
         'updatetime': False,
         'noplaylist': True if download_type == 'single' else False,
     }
+    ydl_opts.update(get_cookie_opts())
     
     # Set ffmpeg location if bundled
     if ffmpeg_dir:
