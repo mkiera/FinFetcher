@@ -211,6 +211,7 @@ class UpdateManager:
 
     GITHUB_API_URL = "https://api.github.com/repos/mkiera/FinFetcher/releases"
     CHECK_COOLDOWN_SECONDS = 3600  # 1 hour between automatic checks
+    MIN_UPDATE_VERSION = (1, 2, 0)  # Don't offer versions older than this (no updater)
 
     def __init__(self):
         self._config_file = os.path.join(FFmpegManager.get_app_data_dir(), 'config.json')
@@ -359,6 +360,11 @@ class UpdateManager:
                 if is_draft:
                     continue
                 if is_prerelease and not include_prerelease:
+                    continue
+
+                # Skip versions older than the minimum (no updater support)
+                parsed = self._parse_version(tag)
+                if parsed[:3] < self.MIN_UPDATE_VERSION:
                     continue
 
                 version = tag.lstrip('v')
@@ -825,7 +831,12 @@ def update_releases():
             if is_prerelease and not include_prerelease:
                 continue
 
+            # Skip versions older than the minimum (no updater support)
             tag = release.get('tag_name', '')
+            parsed = update_manager._parse_version(tag)
+            if parsed[:3] < update_manager.MIN_UPDATE_VERSION:
+                continue
+
             version = tag.lstrip('v')
 
             # Find exe asset
