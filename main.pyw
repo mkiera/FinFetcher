@@ -255,26 +255,30 @@ class UpdateManager:
 
     @staticmethod
     def _parse_version(version_str):
-        """Parse a version string like '1.2.3' or '1.2.3b' into a comparable tuple.
+        """Parse a version string into a comparable tuple.
+        
+        Supports formats:
+          '1.2.3'           → stable
+          '1.2.3b'          → pre-release (legacy bugfix beta)
+          '1.2.3f-branch'   → pre-release (feature beta)
+          '1.2.3b-branch'   → pre-release (bugfix beta)
+          '1.2.3-beta'      → pre-release
+          '1.2.3-rc1'       → pre-release
         
         Returns (major, minor, patch, is_stable) where is_stable is 1 for
-        stable releases and 0 for pre-releases (beta/rc).
+        stable releases and 0 for pre-releases.
         """
+        import re
         v = version_str.strip().lstrip('v')
-        # Detect pre-release suffix
-        is_stable = 1
-        for suffix in ['b', '-beta', '-rc', '-alpha']:
-            if suffix in v:
-                is_stable = 0
-                v = v.split(suffix)[0]  # strip suffix for numeric parsing
-                break
-        parts = v.split('.')
-        try:
-            major = int(parts[0]) if len(parts) > 0 else 0
-            minor = int(parts[1]) if len(parts) > 1 else 0
-            patch = int(parts[2]) if len(parts) > 2 else 0
-        except ValueError:
-            major, minor, patch = 0, 0, 0
+        # Extract numeric major.minor.patch, treating any trailing
+        # non-numeric suffix (f-branch, b-branch, -beta, etc.) as pre-release.
+        m = re.match(r'^(\d+)(?:\.(\d+))?(?:\.(\d+))?([a-zA-Z\-].*)?$', v)
+        if not m:
+            return (0, 0, 0, 1)
+        major = int(m.group(1)) if m.group(1) else 0
+        minor = int(m.group(2)) if m.group(2) else 0
+        patch = int(m.group(3)) if m.group(3) else 0
+        is_stable = 0 if m.group(4) else 1
         return (major, minor, patch, is_stable)
 
     def _is_newer(self, remote_version, local_version):
