@@ -446,8 +446,12 @@ class UpdateManager:
         try:
             if getattr(sys, 'frozen', False):
                 current_exe = sys.executable
-                # Helper script is bundled alongside the exe
-                helper_script = os.path.join(sys._MEIPASS, 'updater_helper.py')
+                # Copy helper out of _MEIPASS to AppData so it doesn't block
+                # PyInstaller's _MEI temp dir cleanup when the main app exits.
+                bundled_helper = os.path.join(sys._MEIPASS, 'updater_helper.py')
+                stable_helper = os.path.join(FFmpegManager.get_app_data_dir(), 'updater_helper.py')
+                shutil.copy2(bundled_helper, stable_helper)
+                helper_script = stable_helper
             else:
                 current_exe = os.path.abspath(__file__)
                 helper_script = os.path.join(os.path.dirname(current_exe), 'updater_helper.py')

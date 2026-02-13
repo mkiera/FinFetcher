@@ -33,6 +33,7 @@ py -3.13 -m PyInstaller --onefile --windowed --name %EXE_NAME% --distpath %OUTPU
     --add-data "script.js;." ^
     --add-data "version.txt;." ^
     --add-data "icon.ico;." ^
+    --add-data "updater_helper.py;." ^
     --clean --noconfirm main.pyw
 
 if errorlevel 1 (
