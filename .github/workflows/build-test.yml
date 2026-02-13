@@ -10,6 +10,7 @@ on:
   push:
     branches:
       - 'feature/**'
+      - 'bugfix/**'
 
 jobs:
   build:
@@ -36,7 +37,9 @@ jobs:
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             echo "NAME=${{ github.event.inputs.build_name }}" >> $GITHUB_OUTPUT
           else
-            BRANCH_NAME=${GITHUB_REF#refs/heads/feature/}
+            BRANCH_NAME=${GITHUB_REF#refs/heads/}
+            BRANCH_NAME=${BRANCH_NAME#feature/}
+            BRANCH_NAME=${BRANCH_NAME#bugfix/}
             echo "NAME=${BRANCH_NAME}" >> $GITHUB_OUTPUT
           fi
       
