@@ -724,9 +724,14 @@ async function fetchReleases(channel) {
                     ? new Date(artifact.published_at).toLocaleDateString()
                     : '';
 
+                const versionBadge = artifact.version
+                    ? `<span class="release-badge current-badge">v${artifact.version}</span>`
+                    : '';
+
                 row.innerHTML = `
                     <div class="release-info">
                         <span class="release-version">${artifact.branch}</span>
+                        ${versionBadge}
                         <span class="release-badge pre-badge">${artifact.sha}</span>
                     </div>
                     <span class="release-date">${date}</span>

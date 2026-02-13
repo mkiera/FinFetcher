@@ -935,9 +935,20 @@ def update_artifacts():
             artifact_name = f'FinFetcher_{branch_suffix}'
             download_url = f'https://nightly.link/mkiera/FinFetcher/actions/runs/{run_id}/{artifact_name}.zip'
 
+            # Fetch version.txt from this commit
+            version = ''
+            try:
+                ver_url = f'https://raw.githubusercontent.com/mkiera/FinFetcher/{run.get("head_sha", "")}/version.txt'
+                ver_req = Request(ver_url, headers={'User-Agent': 'FinFetcher-Updater/1.0'})
+                with urlopen(ver_req, timeout=5) as ver_resp:
+                    version = ver_resp.read().decode('utf-8').strip()
+            except Exception:
+                pass
+
             result.append({
                 'branch': branch,
                 'sha': sha,
+                'version': version,
                 'run_id': run_id,
                 'artifact_name': artifact_name,
                 'published_at': run.get('created_at', ''),
