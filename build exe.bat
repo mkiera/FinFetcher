@@ -18,7 +18,7 @@ if errorlevel 1 (
 
 REM Set output path
 set OUTPUT_DIR=%USERPROFILE%\Downloads
-set EXE_NAME=FinFetcher_v%VERSION%
+set EXE_NAME=FinFetcher
 
 echo.
 echo [1/3] Building EXE (this may take a few minutes)...
