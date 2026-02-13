@@ -32,8 +32,8 @@ jobs:
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          # Detect beta: matches patterns like 1.0.1b, 1.0.1b-streaming, 1.0.1-beta
-          if [[ "$VERSION" =~ [0-9]b(-|$) ]] || [[ "$VERSION" == *"-beta"* ]]; then
+          # Detect pre-release: matches patterns like 1.0.1b, 1.0.1b-hotfix, 1.0.1f-feature, 1.0.1-beta
+          if [[ "$VERSION" =~ [0-9][bf](-|$) ]] || [[ "$VERSION" == *"-beta"* ]]; then
             echo "IS_BETA=true" >> $GITHUB_OUTPUT
           else
             echo "IS_BETA=false" >> $GITHUB_OUTPUT
@@ -42,7 +42,7 @@ jobs:
       
       - name: Build EXE
         run: |
-          python -m PyInstaller --onefile --windowed --name "FinFetcher_v${{ steps.version.outputs.VERSION }}" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --add-data "updater_helper.py;." --clean --noconfirm main.pyw
+          python -m PyInstaller --onefile --windowed --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --add-data "updater_helper.py;." --clean --noconfirm main.pyw
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
@@ -57,10 +57,10 @@ jobs:
             - See commit history for changes
             
             ### Installation
-            1. Download `FinFetcher_v${{ steps.version.outputs.VERSION }}.exe`
+            1. Download `FinFetcher.exe`
             2. Run the exe - Dependencies will be installed automatically on first launch
             3. Start downloading! 🎬🎵
-          files: dist/FinFetcher_v${{ steps.version.outputs.VERSION }}.exe
+          files: dist/FinFetcher.exe
           draft: false
           prerelease: ${{ steps.version.outputs.IS_BETA == 'true' }}
         env:
