@@ -408,7 +408,8 @@ class UpdateManager:
     def download_update(self, asset_url, asset_name, progress_callback=None):
         """Download an update asset to a temp directory.
         
-        Returns the path to the downloaded file, or None on failure.
+        If the downloaded file is a zip, extracts the first .exe from it.
+        Returns the path to the downloaded/extracted exe, or None on failure.
         """
         try:
             download_dir = os.path.join(FFmpegManager.get_app_data_dir(), 'updates')
@@ -435,6 +436,22 @@ class UpdateManager:
                             size_mb = downloaded / (1024 * 1024)
                             total_mb = total_size / (1024 * 1024)
                             progress_callback(percent, f"Downloading... {size_mb:.1f}/{total_mb:.1f} MB")
+
+            # If it's a zip (e.g. GitHub Actions artifact), extract the exe
+            if asset_name.lower().endswith('.zip'):
+                if progress_callback:
+                    progress_callback(95, 'Extracting update...')
+                with zipfile.ZipFile(dest_path, 'r') as zf:
+                    exe_files = [n for n in zf.namelist() if n.lower().endswith('.exe')]
+                    if not exe_files:
+                        if progress_callback:
+                            progress_callback(0, 'No exe found in zip')
+                        return None
+                    zf.extract(exe_files[0], download_dir)
+                    extracted_path = os.path.join(download_dir, exe_files[0])
+                # Clean up the zip
+                os.remove(dest_path)
+                return extracted_path
 
             return dest_path
 
@@ -867,6 +884,78 @@ def update_releases():
 
     except Exception as e:
         return jsonify({'error': str(e), 'releases': [], 'current_version': current_version})
+
+
+@app.route('/api/update/artifacts', methods=['GET'])
+def update_artifacts():
+    """List recent CI build artifacts from GitHub Actions.
+    
+    Uses the public GitHub API to list successful workflow runs,
+    and constructs nightly.link URLs for unauthenticated download.
+    """
+    current_version = update_manager.get_current_version()
+    try:
+        # Fetch recent successful runs from the build-test workflow
+        api_url = (
+            'https://api.github.com/repos/mkiera/FinFetcher/actions/runs'
+            '?status=success&per_page=20'
+        )
+        req = Request(api_url, headers={
+            'User-Agent': 'FinFetcher-Updater/1.0',
+            'Accept': 'application/vnd.github.v3+json',
+        })
+        with urlopen(req, timeout=15) as response:
+            data = json.loads(response.read().decode('utf-8'))
+
+        result = []
+        seen_branches = set()
+        for run in data.get('workflow_runs', []):
+            branch = run.get('head_branch', '')
+            run_id = run.get('id')
+            sha = run.get('head_sha', '')[:7]
+            workflow_name = run.get('name', '')
+
+            # Only include build-test runs (not release builds)
+            if workflow_name != 'Build Test':
+                continue
+
+            # Show only the latest run per branch
+            if branch in seen_branches:
+                continue
+            seen_branches.add(branch)
+
+            # Construct nightly.link download URL
+            # Format: https://nightly.link/owner/repo/actions/runs/{run_id}/{artifact_name}.zip
+            # The artifact name from build-test.yml is FinFetcher_{branch_suffix}
+            branch_suffix = branch
+            for prefix in ('feature/', 'bugfix/'):
+                if branch_suffix.startswith(prefix):
+                    branch_suffix = branch_suffix[len(prefix):]
+                    break
+            artifact_name = f'FinFetcher_{branch_suffix}'
+            download_url = f'https://nightly.link/mkiera/FinFetcher/actions/runs/{run_id}/{artifact_name}.zip'
+
+            result.append({
+                'branch': branch,
+                'sha': sha,
+                'run_id': run_id,
+                'artifact_name': artifact_name,
+                'published_at': run.get('created_at', ''),
+                'html_url': run.get('html_url', ''),
+                'exe_asset': {
+                    'name': f'{artifact_name}.zip',
+                    'url': download_url,
+                    'size': 0,  # Unknown until download
+                },
+            })
+
+        return jsonify({
+            'artifacts': result,
+            'current_version': current_version,
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e), 'artifacts': [], 'current_version': current_version})
 
 
 _cookie_opts_cache = None
