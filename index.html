@@ -77,7 +77,23 @@
             <h1>🦭 FinFetcher</h1>
             <p>A Video & Music Extractor</p>
             <span class="version" id="versionDisplay">Loading...</span>
+            <button class="settings-gear" onclick="toggleSettings()" title="Settings">⚙️</button>
         </header>
+
+        <!-- Update Notification Banner -->
+        <div id="updateBanner" class="update-banner hidden">
+            <div class="update-banner-content">
+                <div class="update-banner-text">
+                    <span class="update-badge">Update Available</span>
+                    <span id="updateVersionInfo">v1.0.0 → v1.1.0</span>
+                </div>
+                <div class="update-banner-actions">
+                    <a id="updateViewLink" href="#" target="_blank" class="update-link">View on GitHub</a>
+                    <button class="update-btn-skip" onclick="dismissUpdate()">Skip</button>
+                    <button class="update-btn-install" onclick="startUpdate()">Update Now</button>
+                </div>
+            </div>
+        </div>
 
         <main class="card glass-panel">
             <div class="input-group">
@@ -132,14 +148,6 @@
                 </div>
 
                 <div id="advancedContent" class="advanced-content hidden">
-
-                    <div class="toggle-row">
-                        <span>Log to File</span>
-                        <label class="switch small">
-                            <input type="checkbox" id="logToggle">
-                            <span class="slider round"></span>
-                        </label>
-                    </div>
 
                     <!-- These options are disabled for playlists -->
                     <div id="singleVideoOptions">
@@ -255,6 +263,78 @@
                 <video id="streamPlayer" controls autoplay playsinline></video>
             </div>
             <div class="stream-status" id="streamStatus"></div>
+        </div>
+    </div>
+
+    <!-- Update Progress Modal -->
+    <div id="updateModal" class="modal hidden">
+        <div class="modal-content glass-panel">
+            <h2>🔄 Updating FinFetcher</h2>
+            <div class="update-progress">
+                <div class="setup-progress-bar">
+                    <div id="updateProgressFill" class="setup-progress-fill"></div>
+                </div>
+                <p id="updateStatus" class="setup-status">Preparing update...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="modal hidden">
+        <div class="modal-content glass-panel settings-modal">
+            <div class="settings-header">
+                <h2>⚙️ Settings</h2>
+                <button class="stream-close-btn" onclick="toggleSettings()">✕</button>
+            </div>
+
+            <!-- General Settings -->
+            <div class="settings-section">
+                <div class="toggle-row">
+                    <span>Log to File</span>
+                    <label class="switch small">
+                        <input type="checkbox" id="logToggle">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+                <div class="toggle-row">
+                    <span>Auto-check for Updates</span>
+                    <label class="switch small">
+                        <input type="checkbox" id="autoUpdateToggle" checked onchange="saveUpdateSettings()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="settings-divider"></div>
+
+            <!-- Update Channel Tabs -->
+            <div class="settings-section">
+                <div class="settings-tabs">
+                    <button class="settings-tab active" data-channel="stable"
+                        onclick="switchUpdateTab('stable')">Stable</button>
+                    <button class="settings-tab" data-channel="prerelease"
+                        onclick="switchUpdateTab('prerelease')">Pre-release</button>
+                </div>
+
+                <div id="releasesList" class="releases-list">
+                    <div class="releases-loading">Select a channel to view releases</div>
+                </div>
+
+                <div class="settings-update-actions">
+                    <button class="secondary small-btn" id="checkUpdatesBtn" onclick="manualCheckForUpdates()">
+                        Check for Updates
+                    </button>
+                    <button class="primary small-btn" id="installSelectedBtn" onclick="installSelectedVersion()"
+                        disabled>
+                        Update
+                    </button>
+                </div>
+                <div id="updateCheckStatus" class="update-check-status"></div>
+            </div>
+
+            <div class="settings-footer">
+                <span id="settingsVersionDisplay">v1.0.0</span>
+            </div>
         </div>
     </div>
 

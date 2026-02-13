@@ -203,6 +203,282 @@ def get_ffmpeg_dir():
         return ffmpeg_manager.get_ffmpeg_dir()
     return None
 
+
+# ============ Update Manager ============
+
+class UpdateManager:
+    """Manages checking for updates from GitHub releases and applying them."""
+
+    GITHUB_API_URL = "https://api.github.com/repos/mkiera/FinFetcher/releases"
+    CHECK_COOLDOWN_SECONDS = 3600  # 1 hour between automatic checks
+
+    def __init__(self):
+        self._config_file = os.path.join(FFmpegManager.get_app_data_dir(), 'config.json')
+        self._config = self._load_config()
+
+    def _load_config(self):
+        """Load update-related config from the shared config file."""
+        try:
+            if os.path.exists(self._config_file):
+                with open(self._config_file, 'r') as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save_config(self):
+        """Save update-related config back to the shared config file."""
+        try:
+            # Merge with existing config (don't overwrite ffmpeg_path etc.)
+            existing = {}
+            if os.path.exists(self._config_file):
+                with open(self._config_file, 'r') as f:
+                    existing = json.load(f)
+            existing.update(self._config)
+            with open(self._config_file, 'w') as f:
+                json.dump(existing, f)
+        except Exception:
+            pass
+
+    def get_current_version(self):
+        """Read the current version from version.txt."""
+        try:
+            if getattr(sys, 'frozen', False):
+                base_path = sys._MEIPASS
+            else:
+                base_path = os.path.dirname(os.path.abspath(__file__))
+            version_file = os.path.join(base_path, 'version.txt')
+            with open(version_file, 'r') as f:
+                return f.read().strip()
+        except Exception:
+            return '0.0.0'
+
+    @staticmethod
+    def _parse_version(version_str):
+        """Parse a version string like '1.2.3' or '1.2.3b' into a comparable tuple.
+        
+        Returns (major, minor, patch, is_stable) where is_stable is 1 for
+        stable releases and 0 for pre-releases (beta/rc).
+        """
+        v = version_str.strip().lstrip('v')
+        # Detect pre-release suffix
+        is_stable = 1
+        for suffix in ['b', '-beta', '-rc', '-alpha']:
+            if suffix in v:
+                is_stable = 0
+                v = v.split(suffix)[0]  # strip suffix for numeric parsing
+                break
+        parts = v.split('.')
+        try:
+            major = int(parts[0]) if len(parts) > 0 else 0
+            minor = int(parts[1]) if len(parts) > 1 else 0
+            patch = int(parts[2]) if len(parts) > 2 else 0
+        except ValueError:
+            major, minor, patch = 0, 0, 0
+        return (major, minor, patch, is_stable)
+
+    def _is_newer(self, remote_version, local_version):
+        """Check if remote_version is newer than local_version."""
+        remote = self._parse_version(remote_version)
+        local = self._parse_version(local_version)
+        # Compare (major, minor, patch) only — don't penalize pre-release
+        return remote[:3] > local[:3]
+
+    def _should_auto_check(self):
+        """Check if enough time has passed since the last automatic check."""
+        last_check = self._config.get('last_update_check')
+        if not last_check:
+            return True
+        try:
+            from datetime import datetime
+            last_dt = datetime.fromisoformat(last_check)
+            now = datetime.now()
+            return (now - last_dt).total_seconds() >= self.CHECK_COOLDOWN_SECONDS
+        except Exception:
+            return True
+
+    def _record_check(self):
+        """Record that an update check just happened."""
+        from datetime import datetime
+        self._config['last_update_check'] = datetime.now().isoformat()
+        self._save_config()
+
+    def get_settings(self):
+        """Return update-related settings."""
+        return {
+            'update_channel': self._config.get('update_channel', 'stable'),
+            'auto_check_updates': self._config.get('auto_check_updates', True),
+            'skipped_version': self._config.get('skipped_version', None),
+        }
+
+    def save_settings(self, settings):
+        """Save update-related settings."""
+        for key in ['update_channel', 'auto_check_updates', 'skipped_version']:
+            if key in settings:
+                self._config[key] = settings[key]
+        self._save_config()
+
+    def check_for_updates(self, force=False):
+        """Check GitHub for a newer release.
+        
+        Args:
+            force: If True, bypass the cooldown cache.
+            
+        Returns dict with update info or None if up-to-date/error.
+        """
+        # Respect cooldown unless forced
+        if not force and not self._should_auto_check():
+            return {'skipped': True, 'reason': 'cooldown'}
+
+        include_prerelease = self._config.get('update_channel', 'stable') == 'prerelease'
+        current_version = self.get_current_version()
+        self._record_check()
+
+        try:
+            req = Request(self.GITHUB_API_URL, headers={
+                'User-Agent': 'FinFetcher-Updater/1.0',
+                'Accept': 'application/vnd.github.v3+json',
+            })
+            with urlopen(req, timeout=15) as response:
+                releases = json.loads(response.read().decode('utf-8'))
+
+            if not releases:
+                return None
+
+            # Find the best candidate release
+            best = None
+            for release in releases:
+                tag = release.get('tag_name', '')
+                is_prerelease = release.get('prerelease', False)
+                is_draft = release.get('draft', False)
+
+                if is_draft:
+                    continue
+                if is_prerelease and not include_prerelease:
+                    continue
+
+                version = tag.lstrip('v')
+                if self._is_newer(version, current_version):
+                    if best is None or self._is_newer(version, best['version']):
+                        # Find the .exe asset
+                        exe_asset = None
+                        for asset in release.get('assets', []):
+                            if asset['name'].endswith('.exe'):
+                                exe_asset = asset
+                                break
+
+                        best = {
+                            'version': version,
+                            'tag': tag,
+                            'prerelease': is_prerelease,
+                            'html_url': release.get('html_url', ''),
+                            'published_at': release.get('published_at', ''),
+                            'exe_asset': {
+                                'name': exe_asset['name'],
+                                'url': exe_asset['browser_download_url'],
+                                'size': exe_asset['size'],
+                            } if exe_asset else None,
+                        }
+
+            if best:
+                # Check if user skipped this version
+                skipped = self._config.get('skipped_version')
+                return {
+                    'available': True,
+                    'current_version': current_version,
+                    'update': best,
+                    'was_skipped': skipped == best['version'],
+                }
+
+            return {'available': False, 'current_version': current_version}
+
+        except Exception as e:
+            return {'error': str(e), 'current_version': current_version}
+
+    def download_update(self, asset_url, asset_name, progress_callback=None):
+        """Download an update asset to a temp directory.
+        
+        Returns the path to the downloaded file, or None on failure.
+        """
+        try:
+            download_dir = os.path.join(FFmpegManager.get_app_data_dir(), 'updates')
+            os.makedirs(download_dir, exist_ok=True)
+            dest_path = os.path.join(download_dir, asset_name)
+
+            req = Request(asset_url, headers={'User-Agent': 'FinFetcher-Updater/1.0'})
+
+            with urlopen(req, timeout=120) as response:
+                total_size = int(response.headers.get('Content-Length', 0))
+                downloaded = 0
+                chunk_size = 1024 * 64
+
+                with open(dest_path, 'wb') as f:
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+
+                        if progress_callback and total_size > 0:
+                            percent = int((downloaded / total_size) * 100)
+                            size_mb = downloaded / (1024 * 1024)
+                            total_mb = total_size / (1024 * 1024)
+                            progress_callback(percent, f"Downloading... {size_mb:.1f}/{total_mb:.1f} MB")
+
+            return dest_path
+
+        except Exception as e:
+            if progress_callback:
+                progress_callback(0, f"Download failed: {str(e)}")
+            return None
+
+    def apply_update(self, downloaded_exe_path):
+        """Launch the updater helper and exit the app.
+        
+        The helper waits for this process to exit, swaps the exe, and relaunches.
+        Returns True if the helper was launched successfully.
+        """
+        try:
+            if getattr(sys, 'frozen', False):
+                current_exe = sys.executable
+                # Helper script is bundled alongside the exe
+                helper_script = os.path.join(sys._MEIPASS, 'updater_helper.py')
+            else:
+                current_exe = os.path.abspath(__file__)
+                helper_script = os.path.join(os.path.dirname(current_exe), 'updater_helper.py')
+
+            pid = os.getpid()
+
+            # Hide console window on Windows
+            startupinfo = None
+            creationflags = 0
+            if os.name == 'nt':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                creationflags = subprocess.CREATE_NO_WINDOW
+
+            # Use python.exe for the helper (not pythonw.exe)
+            python_exe = _get_python_exe() if not getattr(sys, 'frozen', False) else sys.executable
+
+            subprocess.Popen(
+                [python_exe, helper_script,
+                 '--pid', str(pid),
+                 '--old', current_exe,
+                 '--new', downloaded_exe_path],
+                startupinfo=startupinfo,
+                creationflags=creationflags,
+            )
+            return True
+
+        except Exception:
+            return False
+
+
+# Global UpdateManager instance
+update_manager = UpdateManager()
+
+
 class Api:
     """PyWebView API for native dialog access."""
     def select_folder(self):
@@ -364,6 +640,156 @@ def setup_exit():
         os._exit(0)
     threading.Thread(target=shutdown, daemon=True).start()
     return jsonify({'success': True})
+
+
+# ============ Update API Endpoints ============
+
+@app.route('/api/update/check', methods=['GET'])
+def update_check():
+    """Check for available updates from GitHub."""
+    force = request.args.get('force', 'false').lower() == 'true'
+    result = update_manager.check_for_updates(force=force)
+    return jsonify(result or {'available': False})
+
+
+@app.route('/api/update/download', methods=['GET'])
+def update_download():
+    """Download an update with SSE progress streaming."""
+    asset_url = request.args.get('url')
+    asset_name = request.args.get('name')
+
+    if not asset_url or not asset_name:
+        return jsonify({'error': 'Missing url or name parameters'}), 400
+
+    def generate():
+        try:
+            yield f"data: {json.dumps({'percent': 0, 'status': 'Starting download...'})}\n\n"
+
+            last_update = [None]
+
+            def progress_cb(percent, status):
+                last_update[0] = {'percent': percent, 'status': status}
+
+            # Download in a thread so we can stream progress
+            result = [None]
+            def do_download():
+                result[0] = update_manager.download_update(asset_url, asset_name, progress_cb)
+
+            t = threading.Thread(target=do_download, daemon=True)
+            t.start()
+
+            while t.is_alive():
+                if last_update[0]:
+                    yield f"data: {json.dumps(last_update[0])}\n\n"
+                    last_update[0] = None
+                time.sleep(0.2)
+
+            # Final update
+            if last_update[0]:
+                yield f"data: {json.dumps(last_update[0])}\n\n"
+
+            if result[0]:
+                yield f"data: {json.dumps({'percent': 100, 'status': 'Download complete!', 'success': True, 'path': result[0]})}\n\n"
+            else:
+                yield f"data: {json.dumps({'percent': 0, 'status': 'Download failed', 'success': False})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'percent': 0, 'status': f'Error: {str(e)}', 'success': False})}\n\n"
+
+    return Response(generate(), mimetype='text/event-stream')
+
+
+@app.route('/api/update/apply', methods=['POST'])
+def update_apply():
+    """Apply a downloaded update (launches helper, then exits)."""
+    data = request.json
+    downloaded_path = data.get('path')
+
+    if not downloaded_path or not os.path.exists(downloaded_path):
+        return jsonify({'success': False, 'error': 'Downloaded file not found'})
+
+    success = update_manager.apply_update(downloaded_path)
+
+    if success:
+        # Schedule app exit after responding
+        def shutdown():
+            time.sleep(1)
+            os._exit(0)
+        threading.Thread(target=shutdown, daemon=True).start()
+        return jsonify({'success': True})
+    else:
+        return jsonify({'success': False, 'error': 'Failed to launch updater'})
+
+
+@app.route('/api/update/settings', methods=['GET', 'POST'])
+def update_settings():
+    """Get or set update preferences."""
+    if request.method == 'GET':
+        settings = update_manager.get_settings()
+        settings['current_version'] = update_manager.get_current_version()
+        return jsonify(settings)
+    else:
+        data = request.json
+        update_manager.save_settings(data)
+        return jsonify({'success': True})
+
+
+@app.route('/api/update/releases', methods=['GET'])
+def update_releases():
+    """List available releases from GitHub, filtered by channel."""
+    channel = request.args.get('channel', 'stable')
+    include_prerelease = channel == 'prerelease'
+    current_version = update_manager.get_current_version()
+
+    try:
+        req = Request(update_manager.GITHUB_API_URL, headers={
+            'User-Agent': 'FinFetcher-Updater/1.0',
+            'Accept': 'application/vnd.github.v3+json',
+        })
+        with urlopen(req, timeout=15) as response:
+            releases = json.loads(response.read().decode('utf-8'))
+
+        result = []
+        for release in releases:
+            is_draft = release.get('draft', False)
+            is_prerelease = release.get('prerelease', False)
+
+            if is_draft:
+                continue
+            if is_prerelease and not include_prerelease:
+                continue
+
+            tag = release.get('tag_name', '')
+            version = tag.lstrip('v')
+
+            # Find exe asset
+            exe_asset = None
+            for asset in release.get('assets', []):
+                if asset['name'].endswith('.exe'):
+                    exe_asset = {
+                        'name': asset['name'],
+                        'url': asset['browser_download_url'],
+                        'size': asset['size'],
+                    }
+                    break
+
+            result.append({
+                'version': version,
+                'tag': tag,
+                'prerelease': is_prerelease,
+                'html_url': release.get('html_url', ''),
+                'published_at': release.get('published_at', ''),
+                'exe_asset': exe_asset,
+                'is_current': version == current_version,
+            })
+
+        return jsonify({
+            'releases': result,
+            'current_version': current_version,
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e), 'releases': [], 'current_version': current_version})
 
 
 _cookie_opts_cache = None

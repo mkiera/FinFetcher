@@ -42,7 +42,7 @@ jobs:
       
       - name: Build EXE
         run: |
-          python -m PyInstaller --onefile --windowed --name "FinFetcher_v${{ steps.version.outputs.VERSION }}" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
+          python -m PyInstaller --onefile --windowed --name "FinFetcher_v${{ steps.version.outputs.VERSION }}" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --add-data "updater_helper.py;." --clean --noconfirm main.pyw
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
