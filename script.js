@@ -694,6 +694,64 @@ async function fetchReleases(channel) {
     document.getElementById('installSelectedBtn').textContent = 'Update';
 
     try {
+        // Alpha channel uses artifacts endpoint
+        if (channel === 'alpha') {
+            const response = await fetch('/api/update/artifacts');
+            const data = await response.json();
+
+            if (data.error) {
+                listEl.innerHTML = `<div class="releases-loading">Error: ${data.error}</div>`;
+                return;
+            }
+
+            if (!data.artifacts || data.artifacts.length === 0) {
+                listEl.innerHTML = '<div class="releases-loading">No alpha builds found</div>';
+                return;
+            }
+
+            const footerVersion = document.getElementById('settingsVersionDisplay');
+            if (footerVersion) footerVersion.textContent = `v${data.current_version}`;
+
+            listEl.innerHTML = '';
+            let firstSelectable = null;
+
+            data.artifacts.forEach(artifact => {
+                const row = document.createElement('div');
+                row.className = 'release-row';
+                row.dataset.version = artifact.branch;
+
+                const date = artifact.published_at
+                    ? new Date(artifact.published_at).toLocaleDateString()
+                    : '';
+
+                row.innerHTML = `
+                    <div class="release-info">
+                        <span class="release-version">${artifact.branch}</span>
+                        <span class="release-badge pre-badge">${artifact.sha}</span>
+                    </div>
+                    <span class="release-date">${date}</span>
+                `;
+
+                if (artifact.exe_asset) {
+                    // Give it a synthetic version for the update flow
+                    artifact.version = `${artifact.branch}@${artifact.sha}`;
+                    row.style.cursor = 'pointer';
+                    row.addEventListener('click', () => selectRelease(artifact, row));
+                    if (!firstSelectable) {
+                        firstSelectable = { release: artifact, row };
+                    }
+                }
+
+                listEl.appendChild(row);
+            });
+
+            if (firstSelectable) {
+                selectRelease(firstSelectable.release, firstSelectable.row);
+            }
+            return;
+        }
+
+        // Stable / Pre-release channels use releases endpoint
         const response = await fetch(`/api/update/releases?channel=${channel}`);
         const data = await response.json();
 
@@ -768,7 +826,12 @@ function selectRelease(release, rowEl) {
 
     const btn = document.getElementById('installSelectedBtn');
     btn.disabled = false;
-    btn.textContent = `Update to v${release.version}`;
+    // Show branch name for artifacts, version for releases
+    if (release.branch) {
+        btn.textContent = `Update to ${release.branch}@${release.sha}`;
+    } else {
+        btn.textContent = `Update to v${release.version}`;
+    }
 }
 
 async function installSelectedVersion() {
