@@ -43,6 +43,8 @@ function showMainApp() {
     // Initialize main app
     selectMode(currentMode);
     loadVersion();
+    loadUpdateSettings();
+    checkForUpdates();
 }
 
 async function installFFmpeg() {
@@ -649,6 +651,348 @@ function closeStream() {
     // Reset button
     document.getElementById('downloadBtn').disabled = false;
     document.getElementById('downloadBtn').textContent = 'Stream';
+}
+
+// --- Settings Modal & Auto-Update Functions ---
+
+let pendingUpdate = null;
+let selectedRelease = null;
+let currentChannel = 'stable';
+
+function toggleSettings() {
+    const modal = document.getElementById('settingsModal');
+    const isHidden = modal.classList.contains('hidden');
+
+    if (isHidden) {
+        modal.classList.remove('hidden');
+        // Load releases for the current tab
+        fetchReleases(currentChannel);
+    } else {
+        modal.classList.add('hidden');
+    }
+}
+
+function switchUpdateTab(channel) {
+    currentChannel = channel;
+    // Update tab active state
+    document.querySelectorAll('.settings-tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.channel === channel);
+    });
+
+    // Save channel preference
+    saveUpdateSettings();
+
+    // Fetch releases for this channel
+    fetchReleases(channel);
+}
+
+async function fetchReleases(channel) {
+    const listEl = document.getElementById('releasesList');
+    listEl.innerHTML = '<div class="releases-loading">Loading releases...</div>';
+    selectedRelease = null;
+    document.getElementById('installSelectedBtn').disabled = true;
+    document.getElementById('installSelectedBtn').textContent = 'Update';
+
+    try {
+        const response = await fetch(`/api/update/releases?channel=${channel}`);
+        const data = await response.json();
+
+        if (data.error) {
+            listEl.innerHTML = `<div class="releases-loading">Error: ${data.error}</div>`;
+            return;
+        }
+
+        if (!data.releases || data.releases.length === 0) {
+            listEl.innerHTML = '<div class="releases-loading">No releases found</div>';
+            return;
+        }
+
+        // Update footer version
+        const footerVersion = document.getElementById('settingsVersionDisplay');
+        if (footerVersion) footerVersion.textContent = `v${data.current_version}`;
+
+        listEl.innerHTML = '';
+        let firstSelectable = null;
+
+        data.releases.forEach(release => {
+            const row = document.createElement('div');
+            row.className = 'release-row' + (release.is_current ? ' current' : '');
+            row.dataset.version = release.version;
+
+            const date = release.published_at
+                ? new Date(release.published_at).toLocaleDateString()
+                : '';
+
+            const badges = [];
+            if (release.is_current) badges.push('<span class="release-badge current-badge">current</span>');
+            if (release.prerelease) badges.push('<span class="release-badge pre-badge">pre-release</span>');
+
+            row.innerHTML = `
+                <div class="release-info">
+                    <span class="release-version">v${release.version}</span>
+                    ${badges.join('')}
+                </div>
+                <span class="release-date">${date}</span>
+            `;
+
+            if (!release.is_current && release.exe_asset) {
+                row.style.cursor = 'pointer';
+                row.addEventListener('click', () => selectRelease(release, row));
+
+                // Default-select the first (most recent) non-current release
+                if (!firstSelectable) {
+                    firstSelectable = { release, row };
+                }
+            }
+
+            listEl.appendChild(row);
+        });
+
+        // Auto-select the most recent selectable release
+        if (firstSelectable) {
+            selectRelease(firstSelectable.release, firstSelectable.row);
+        }
+
+    } catch (e) {
+        listEl.innerHTML = `<div class="releases-loading">Failed to load: ${e.message}</div>`;
+    }
+}
+
+function selectRelease(release, rowEl) {
+    // Deselect previous
+    document.querySelectorAll('.release-row.selected').forEach(r => r.classList.remove('selected'));
+
+    // Select new
+    rowEl.classList.add('selected');
+    selectedRelease = release;
+
+    const btn = document.getElementById('installSelectedBtn');
+    btn.disabled = false;
+    btn.textContent = `Update to v${release.version}`;
+}
+
+async function installSelectedVersion() {
+    if (!selectedRelease || !selectedRelease.exe_asset) {
+        alert('No version selected or no executable available.');
+        return;
+    }
+
+    // Store as pending and use starUpdate flow
+    pendingUpdate = selectedRelease;
+
+    // Close settings modal
+    document.getElementById('settingsModal').classList.add('hidden');
+
+    // Trigger the download and apply flow
+    startUpdate();
+}
+
+async function checkForUpdates(force = false) {
+    try {
+        const params = new URLSearchParams();
+        if (force) params.set('force', 'true');
+
+        const response = await fetch(`/api/update/check?${params}`);
+        const data = await response.json();
+
+        if (data.skipped) return; // Cooldown, no need to check
+        if (data.error) {
+            console.warn('Update check failed:', data.error);
+            return null;
+        }
+
+        if (data.available && data.update) {
+            // Don't show banner for skipped versions (unless forced)
+            if (data.was_skipped && !force) return data;
+
+            pendingUpdate = data.update;
+            showUpdateBanner(data.current_version, data.update);
+        }
+        return data;
+    } catch (e) {
+        console.warn('Update check error:', e);
+        return null;
+    }
+}
+
+async function manualCheckForUpdates() {
+    const statusEl = document.getElementById('updateCheckStatus');
+    const btn = document.getElementById('checkUpdatesBtn');
+
+    btn.disabled = true;
+    btn.textContent = 'Checking...';
+    statusEl.textContent = '🔄 Checking GitHub for updates...';
+    statusEl.className = 'update-check-status';
+
+    try {
+        const data = await checkForUpdates(true);
+
+        if (!data) {
+            statusEl.textContent = '❌ Could not reach GitHub';
+            statusEl.className = 'update-check-status error';
+        } else if (data.error) {
+            statusEl.textContent = `❌ ${data.error}`;
+            statusEl.className = 'update-check-status error';
+        } else if (data.available && data.update) {
+            statusEl.textContent = `✅ Update available: v${data.update.version}`;
+            statusEl.className = 'update-check-status success';
+        } else {
+            statusEl.textContent = '✅ You are on the latest version! 🦭';
+            statusEl.className = 'update-check-status success';
+        }
+
+        // Refresh the release list
+        fetchReleases(currentChannel);
+
+    } catch (e) {
+        statusEl.textContent = `❌ ${e.message}`;
+        statusEl.className = 'update-check-status error';
+    }
+
+    btn.disabled = false;
+    btn.textContent = 'Check for Updates';
+}
+
+function showUpdateBanner(currentVersion, update) {
+    const banner = document.getElementById('updateBanner');
+    const versionInfo = document.getElementById('updateVersionInfo');
+    const viewLink = document.getElementById('updateViewLink');
+
+    versionInfo.textContent = `v${currentVersion} → v${update.version}${update.prerelease ? ' (pre-release)' : ''}`;
+    viewLink.href = update.html_url;
+
+    banner.classList.remove('hidden');
+}
+
+function dismissUpdate() {
+    const banner = document.getElementById('updateBanner');
+    banner.classList.add('hidden');
+
+    // Save skipped version
+    if (pendingUpdate) {
+        fetch('/api/update/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ skipped_version: pendingUpdate.version })
+        });
+    }
+}
+
+async function startUpdate() {
+    if (!pendingUpdate || !pendingUpdate.exe_asset) {
+        alert('No update available to install.');
+        return;
+    }
+
+    // Hide banner, show progress modal
+    document.getElementById('updateBanner').classList.add('hidden');
+    const modal = document.getElementById('updateModal');
+    const progressFill = document.getElementById('updateProgressFill');
+    const status = document.getElementById('updateStatus');
+    modal.classList.remove('hidden');
+
+    const asset = pendingUpdate.exe_asset;
+    const params = new URLSearchParams({ url: asset.url, name: asset.name });
+
+    try {
+        const response = await fetch(`/api/update/download?${params}`);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let downloadedPath = null;
+
+        while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            const chunk = decoder.decode(value);
+            const lines = chunk.split('\n\n');
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.substring(6));
+                        progressFill.style.width = data.percent + '%';
+                        status.textContent = data.status;
+
+                        if (data.success === true && data.path) {
+                            downloadedPath = data.path;
+                        } else if (data.success === false) {
+                            status.textContent = 'Update failed: ' + data.status;
+                            status.style.color = '#ff6b6b';
+                            setTimeout(() => modal.classList.add('hidden'), 3000);
+                            return;
+                        }
+                    } catch (e) { /* ignore partial JSON */ }
+                }
+            }
+        }
+
+        if (downloadedPath) {
+            status.textContent = 'Installing update... 🦭';
+            progressFill.style.width = '100%';
+
+            // Apply the update (app will exit and relaunch)
+            const applyResponse = await fetch('/api/update/apply', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: downloadedPath })
+            });
+            const applyData = await applyResponse.json();
+
+            if (applyData.success) {
+                status.textContent = 'Restarting with new version...';
+            } else {
+                status.textContent = 'Failed to apply update: ' + (applyData.error || 'Unknown error');
+                status.style.color = '#ff6b6b';
+                setTimeout(() => modal.classList.add('hidden'), 3000);
+            }
+        }
+    } catch (e) {
+        status.textContent = 'Update error: ' + e.message;
+        status.style.color = '#ff6b6b';
+        setTimeout(() => modal.classList.add('hidden'), 3000);
+    }
+}
+
+async function loadUpdateSettings() {
+    try {
+        const response = await fetch('/api/update/settings');
+        const settings = await response.json();
+
+        const autoToggle = document.getElementById('autoUpdateToggle');
+        if (autoToggle) autoToggle.checked = settings.auto_check_updates !== false;
+
+        // Set the active channel tab
+        currentChannel = settings.update_channel || 'stable';
+        document.querySelectorAll('.settings-tab').forEach(tab => {
+            tab.classList.toggle('active', tab.dataset.channel === currentChannel);
+        });
+
+        // Update footer version
+        const footerVersion = document.getElementById('settingsVersionDisplay');
+        if (footerVersion && settings.current_version) {
+            footerVersion.textContent = `v${settings.current_version}`;
+        }
+    } catch (e) {
+        console.warn('Could not load update settings:', e);
+    }
+}
+
+async function saveUpdateSettings() {
+    const autoCheck = document.getElementById('autoUpdateToggle').checked;
+
+    try {
+        await fetch('/api/update/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                update_channel: currentChannel,
+                auto_check_updates: autoCheck
+            })
+        });
+    } catch (e) {
+        console.warn('Could not save update settings:', e);
+    }
 }
 
 // --- Debug Panel ---
