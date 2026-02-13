@@ -455,12 +455,17 @@ class UpdateManager:
 
             if getattr(sys, 'frozen', False):
                 current_exe = sys.executable
+                exe_dir = os.path.dirname(current_exe)
                 # Generate a batch script in AppData (outside _MEI)
                 bat_path = os.path.join(FFmpegManager.get_app_data_dir(), 'update.bat')
                 updates_dir = os.path.join(FFmpegManager.get_app_data_dir(), 'updates')
+                log_path = os.path.join(FFmpegManager.get_app_data_dir(), 'update.log')
 
                 bat_content = f'''@echo off
 setlocal
+
+set LOGFILE="{log_path}"
+echo [%DATE% %TIME%] Update started >> %LOGFILE%
 
 REM Wait for the main app to exit
 :wait_loop
@@ -469,19 +474,16 @@ if not errorlevel 1 (
     timeout /t 1 /nobreak >NUL
     goto wait_loop
 )
+echo [%DATE% %TIME%] App exited >> %LOGFILE%
 
 REM Grace period for file handles to release
 timeout /t 2 /nobreak >NUL
-
-REM Clean up leftover PyInstaller _MEI temp directories
-for /d %%D in ("%TEMP%\\_MEI*") do (
-    rmdir /s /q "%%D" 2>NUL
-)
 
 REM Replace the old exe
 if exist "{current_exe}.bak" del /f "{current_exe}.bak"
 if exist "{current_exe}" move /y "{current_exe}" "{current_exe}.bak"
 move /y "{downloaded_exe_path}" "{current_exe}"
+echo [%DATE% %TIME%] Exe swapped >> %LOGFILE%
 
 REM Clean up backup
 del /f "{current_exe}.bak" 2>NUL
@@ -489,8 +491,12 @@ del /f "{current_exe}.bak" 2>NUL
 REM Clean up updates download dir
 if exist "{updates_dir}" rmdir /s /q "{updates_dir}" 2>NUL
 
-REM Relaunch the updated app
-start "" "{current_exe}"
+REM Brief pause before relaunch
+timeout /t 1 /nobreak >NUL
+
+REM Relaunch the updated app from its own directory
+echo [%DATE% %TIME%] Launching >> %LOGFILE%
+start "" /D "{exe_dir}" "{current_exe}"
 
 REM Self-delete this batch script
 del /f "%~f0" 2>NUL
