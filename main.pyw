@@ -438,45 +438,97 @@ class UpdateManager:
             return None
 
     def apply_update(self, downloaded_exe_path):
-        """Launch the updater helper and exit the app.
+        """Launch an updater script and exit the app.
         
-        The helper waits for this process to exit, swaps the exe, and relaunches.
-        Returns True if the helper was launched successfully.
+        When frozen (PyInstaller --onefile), sys.executable is the exe itself
+        and cannot be used as a Python interpreter. Instead we generate a
+        Windows batch script that waits for this process to exit, swaps the
+        exe, cleans up, and relaunches. This runs completely outside the _MEI
+        temp directory so PyInstaller can clean it up.
+        
+        When running from source, we use the Python-based helper directly.
+        
+        Returns True if the updater was launched successfully.
         """
         try:
-            if getattr(sys, 'frozen', False):
-                current_exe = sys.executable
-                # Copy helper out of _MEIPASS to AppData so it doesn't block
-                # PyInstaller's _MEI temp dir cleanup when the main app exits.
-                bundled_helper = os.path.join(sys._MEIPASS, 'updater_helper.py')
-                stable_helper = os.path.join(FFmpegManager.get_app_data_dir(), 'updater_helper.py')
-                shutil.copy2(bundled_helper, stable_helper)
-                helper_script = stable_helper
-            else:
-                current_exe = os.path.abspath(__file__)
-                helper_script = os.path.join(os.path.dirname(current_exe), 'updater_helper.py')
-
             pid = os.getpid()
 
-            # Hide console window on Windows
-            startupinfo = None
-            creationflags = 0
-            if os.name == 'nt':
+            if getattr(sys, 'frozen', False):
+                current_exe = sys.executable
+                # Generate a batch script in AppData (outside _MEI)
+                bat_path = os.path.join(FFmpegManager.get_app_data_dir(), 'update.bat')
+                updates_dir = os.path.join(FFmpegManager.get_app_data_dir(), 'updates')
+
+                bat_content = f'''@echo off
+setlocal
+
+REM Wait for the main app to exit
+:wait_loop
+tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >NUL
+    goto wait_loop
+)
+
+REM Grace period for file handles to release
+timeout /t 2 /nobreak >NUL
+
+REM Clean up leftover PyInstaller _MEI temp directories
+for /d %%D in ("%TEMP%\\_MEI*") do (
+    rmdir /s /q "%%D" 2>NUL
+)
+
+REM Replace the old exe
+if exist "{current_exe}.bak" del /f "{current_exe}.bak"
+if exist "{current_exe}" move /y "{current_exe}" "{current_exe}.bak"
+move /y "{downloaded_exe_path}" "{current_exe}"
+
+REM Clean up backup
+del /f "{current_exe}.bak" 2>NUL
+
+REM Clean up updates download dir
+if exist "{updates_dir}" rmdir /s /q "{updates_dir}" 2>NUL
+
+REM Relaunch the updated app
+start "" "{current_exe}"
+
+REM Self-delete this batch script
+del /f "%~f0" 2>NUL
+'''
+                with open(bat_path, 'w') as f:
+                    f.write(bat_content)
+
+                # Launch the batch script hidden (no console window)
                 startupinfo = subprocess.STARTUPINFO()
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                creationflags = subprocess.CREATE_NO_WINDOW
+                startupinfo.wShowWindow = 0  # SW_HIDE
+                subprocess.Popen(
+                    ['cmd.exe', '/c', bat_path],
+                    startupinfo=startupinfo,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            else:
+                # Running from source — use the Python-based helper
+                current_exe = os.path.abspath(__file__)
+                helper_script = os.path.join(os.path.dirname(current_exe), 'updater_helper.py')
+                python_exe = _get_python_exe()
 
-            # Use python.exe for the helper (not pythonw.exe)
-            python_exe = _get_python_exe() if not getattr(sys, 'frozen', False) else sys.executable
+                startupinfo = None
+                creationflags = 0
+                if os.name == 'nt':
+                    startupinfo = subprocess.STARTUPINFO()
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    creationflags = subprocess.CREATE_NO_WINDOW
 
-            subprocess.Popen(
-                [python_exe, helper_script,
-                 '--pid', str(pid),
-                 '--old', current_exe,
-                 '--new', downloaded_exe_path],
-                startupinfo=startupinfo,
-                creationflags=creationflags,
-            )
+                subprocess.Popen(
+                    [python_exe, helper_script,
+                     '--pid', str(pid),
+                     '--old', current_exe,
+                     '--new', downloaded_exe_path],
+                    startupinfo=startupinfo,
+                    creationflags=creationflags,
+                )
+
             return True
 
         except Exception:
