@@ -494,9 +494,9 @@ if exist "{updates_dir}" rmdir /s /q "{updates_dir}" 2>NUL
 REM Brief pause before relaunch
 timeout /t 1 /nobreak >NUL
 
-REM Relaunch the updated app from its own directory
+REM Relaunch the updated app (use explorer to simulate double-click)
 echo [%DATE% %TIME%] Launching >> %LOGFILE%
-start "" /D "{exe_dir}" "{current_exe}"
+explorer.exe "{current_exe}"
 
 REM Self-delete this batch script
 del /f "%~f0" 2>NUL
