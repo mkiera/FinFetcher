@@ -21,6 +21,8 @@ Supports hundreds of sites!
 - ▶️ **Stream Playback** - Watch videos directly without downloading
 - ✂️ **Video Trimming** - Trim videos to specific timestamps
 - 📂 **Playlist Support** - Download entire playlists
+- 🔄 **Auto-Update** - Check for and install updates directly from the app
+- 🍪 **Cookie Auth** - Bypass YouTube 403 errors with browser cookie support
 
 ## Download
 
