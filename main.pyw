@@ -1035,6 +1035,36 @@ except Exception as e:
     
     return None
 
+def _try_browser_cookies(browser, result_holder, timeout=10):
+    """Try to load cookies from a browser with a strict timeout.
+    
+    Uses a background thread to prevent yt-dlp from hanging the main thread
+    if browser cookie extraction stalls (e.g., locked DB, missing browser).
+    """
+    def _probe():
+        try:
+            test_opts = {
+                'cookiesfrombrowser': (browser,),
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': True,
+            }
+            with yt_dlp.YoutubeDL(test_opts) as ydl:
+                # Just initialize the cookie jar — don't make a network request.
+                # If the browser cookies can be read, the YoutubeDL context
+                # manager succeeds. A full extract_info call can hang forever.
+                if ydl.cookiejar is not None:
+                    result_holder.append(browser)
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_probe, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    # If the thread is still alive after timeout, we abandon it (daemon=True)
+    return len(result_holder) > 0
+
+
 def get_cookie_opts():
     """Get yt-dlp cookie options for YouTube authentication.
     
@@ -1043,6 +1073,8 @@ def get_cookie_opts():
     On Windows, Chromium cookies are extracted via a python.exe subprocess
     to work around DPAPI failures in pythonw.exe.
     Result is cached for the lifetime of the app.
+    
+    All browser probes use strict timeouts to prevent the app from hanging.
     """
     global _cookie_opts_cache
     if _cookie_opts_cache is not None:
@@ -1053,44 +1085,37 @@ def get_cookie_opts():
     non_chromium = ['firefox']
     
     if os.name == 'nt':
-        # Try non-Chromium first (no DPAPI), then Chromium via subprocess
+        # Try non-Chromium first (no DPAPI issues)
         for browser in non_chromium:
-            try:
-                test_opts = {
-                    'cookiesfrombrowser': (browser,),
-                    'quiet': True,
-                    'no_warnings': True,
-                    'extract_flat': True,
-                }
-                with yt_dlp.YoutubeDL(test_opts) as ydl:
-                    ydl.extract_info('https://www.youtube.com/watch?v=jNQXAC9IVRw', download=False)
-                    _cookie_opts_cache = {'cookiesfrombrowser': (browser,)}
-                    return _cookie_opts_cache
-            except Exception:
-                continue
-        
-        # Try Chromium browsers via subprocess
-        for browser in chromium_browsers:
-            cookies_file = _extract_cookies_via_subprocess(browser)
-            if cookies_file:
-                _cookie_opts_cache = {'cookiefile': cookies_file}
+            result = []
+            if _try_browser_cookies(browser, result, timeout=10):
+                _cookie_opts_cache = {'cookiesfrombrowser': (browser,)}
                 return _cookie_opts_cache
-    else:
-        # Non-Windows: try all browsers directly
-        for browser in chromium_browsers + non_chromium:
-            try:
-                test_opts = {
-                    'cookiesfrombrowser': (browser,),
-                    'quiet': True,
-                    'no_warnings': True,
-                    'extract_flat': True,
-                }
-                with yt_dlp.YoutubeDL(test_opts) as ydl:
-                    ydl.extract_info('https://www.youtube.com/watch?v=jNQXAC9IVRw', download=False)
+        
+        # Try Chromium browsers via subprocess extraction
+        # Skip if running as a frozen exe — _get_python_exe() would return
+        # the app exe itself, which can't run arbitrary Python scripts.
+        if not getattr(sys, 'frozen', False):
+            for browser in chromium_browsers:
+                cookies_file = _extract_cookies_via_subprocess(browser)
+                if cookies_file:
+                    _cookie_opts_cache = {'cookiefile': cookies_file}
+                    return _cookie_opts_cache
+        else:
+            # Frozen exe: try Chromium directly (may fail due to DPAPI,
+            # but won't hang thanks to the timeout wrapper)
+            for browser in chromium_browsers:
+                result = []
+                if _try_browser_cookies(browser, result, timeout=10):
                     _cookie_opts_cache = {'cookiesfrombrowser': (browser,)}
                     return _cookie_opts_cache
-            except Exception:
-                continue
+    else:
+        # Non-Windows: try all browsers directly with timeout
+        for browser in chromium_browsers + non_chromium:
+            result = []
+            if _try_browser_cookies(browser, result, timeout=10):
+                _cookie_opts_cache = {'cookiesfrombrowser': (browser,)}
+                return _cookie_opts_cache
     
     # No browser cookies available — proceed without them
     _cookie_opts_cache = {}
@@ -1098,18 +1123,42 @@ def get_cookie_opts():
 
 
 def get_video_info(url, flat=True):
-    """Fetch video metadata using yt-dlp Python API."""
+    """Fetch video metadata using yt-dlp Python API.
+    
+    Uses a background thread with a 30-second timeout to prevent
+    the app from hanging if yt-dlp stalls on network requests.
+    """
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'extract_flat': flat,
     }
     ydl_opts.update(get_cookie_opts())
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(url, download=False)
-    except Exception as e:
-        raise Exception(str(e))
+    
+    result_holder = [None]
+    error_holder = [None]
+    
+    def _fetch():
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                result_holder[0] = ydl.extract_info(url, download=False)
+        except Exception as e:
+            error_holder[0] = e
+    
+    t = threading.Thread(target=_fetch, daemon=True)
+    t.start()
+    t.join(timeout=30)
+    
+    if t.is_alive():
+        raise Exception("Request timed out after 30 seconds. YouTube may be blocking requests — try again or check your network connection.")
+    
+    if error_holder[0]:
+        raise Exception(str(error_holder[0]))
+    
+    if result_holder[0] is None:
+        raise Exception("No result returned from yt-dlp.")
+    
+    return result_holder[0]
 
 
 def estimate_size(formats, quality='max'):
@@ -1260,22 +1309,45 @@ def run_debug_test():
     data = request.json
     test_url = data.get('url', 'https://www.youtube.com/watch?v=dQw4w9WgXcQ')  # Default test video
     
-    try:
-        ydl_opts = {'quiet': True}
-        ydl_opts.update(get_cookie_opts())
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(test_url, download=False)
-            return jsonify({
-                'success': True,
-                'message': 'yt-dlp can fetch video info successfully!',
-                'title': info.get('title', 'Unknown')
-            })
-    except Exception as e:
+    result_holder = [None]
+    
+    def _run():
+        try:
+            ydl_opts = {'quiet': True}
+            ydl_opts.update(get_cookie_opts())
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(test_url, download=False)
+                result_holder[0] = {
+                    'success': True,
+                    'message': 'yt-dlp can fetch video info successfully!',
+                    'title': info.get('title', 'Unknown')
+                }
+        except Exception as e:
+            result_holder[0] = {
+                'success': False,
+                'message': 'Exception',
+                'error': str(e)
+            }
+    
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=30)
+    
+    if t.is_alive():
         return jsonify({
             'success': False,
-            'message': 'Exception',
-            'error': str(e)
+            'message': 'Timeout',
+            'error': 'Diagnostic test timed out after 30 seconds. This usually means yt-dlp is hanging on a network request or cookie extraction.'
         })
+    
+    if result_holder[0]:
+        return jsonify(result_holder[0])
+    
+    return jsonify({
+        'success': False,
+        'message': 'Unknown',
+        'error': 'No result returned from diagnostic test.'
+    })
 
 
 @app.route('/api/stream', methods=['POST'])
