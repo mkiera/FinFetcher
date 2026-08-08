@@ -1227,7 +1227,8 @@ async function loadDebugInfo() {
         const deps = data.dependencies;
         document.getElementById('debugDependencies').textContent =
             `yt-dlp: ${deps['yt-dlp']}\n` +
-            `ffmpeg: ${deps['ffmpeg']}`;
+            `ffmpeg: ${deps['ffmpeg']}\n` +
+            `CA store: ${deps['CA store'] || 'unknown'}`;
 
         // Last error
         if (lastError) {

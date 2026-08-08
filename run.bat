@@ -20,7 +20,7 @@ if errorlevel 1 (
 
 REM Install Python packages
 echo [1/4] Installing Python packages...
-py -3.13 -m pip install -q flask pywebview yt-dlp
+py -3.13 -m pip install -q -r requirements.txt
 if errorlevel 1 (
     echo [WARNING] pip install may have had issues.
 )

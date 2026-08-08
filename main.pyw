@@ -31,6 +31,7 @@ except ImportError:
     certifi = None
 
 _ssl_context = None
+_ssl_ca_source = None
 
 
 def get_ssl_context():
@@ -39,15 +40,35 @@ def get_ssl_context():
     Windows' own certificate store can hold an expired root that OpenSSL
     then picks when building a chain, so verification fails for hosts the
     rest of the system trusts fine (nightly.link is one). certifi's bundle
-    avoids that; fall back to the system default if it isn't available.
+    avoids that; fall back to the system store if it isn't available.
+
+    The fallback is a degraded state, not a normal one — get_ca_source()
+    reports which store is in use so the debug panel and any TLS failure
+    can say so instead of failing mysteriously.
     """
-    global _ssl_context
+    global _ssl_context, _ssl_ca_source
     if _ssl_context is None:
         try:
-            _ssl_context = ssl.create_default_context(cafile=certifi.where())
-        except Exception:
+            ca_file = certifi.where()
+            if not os.path.exists(ca_file):
+                raise FileNotFoundError(ca_file)
+            _ssl_context = ssl.create_default_context(cafile=ca_file)
+            _ssl_ca_source = f'certifi ({ca_file})'
+        except Exception as e:
             _ssl_context = ssl.create_default_context()
+            _ssl_ca_source = f'system certificate store — certifi unavailable ({e})'
     return _ssl_context
+
+
+def get_ca_source():
+    """Describe which CA store HTTPS verification is using."""
+    get_ssl_context()
+    return _ssl_ca_source
+
+
+def using_system_ca():
+    """True when we fell back to the OS store, which may hold expired roots."""
+    return get_ca_source().startswith('system')
 
 
 class FFmpegManager:
@@ -520,8 +541,16 @@ class UpdateManager:
 
         except Exception as e:
             self.last_download_error = str(e)
+            # A verification failure while on the OS store is the known
+            # bad state — say so rather than leaving a raw SSL error.
+            if 'CERTIFICATE_VERIFY_FAILED' in str(e) and using_system_ca():
+                self.last_download_error += (
+                    ' — this build has no bundled CA store, so it is using the '
+                    'Windows certificate store, which has an expired root. '
+                    'Please download the update manually.'
+                )
             if progress_callback:
-                progress_callback(0, f"Download failed: {str(e)}")
+                progress_callback(0, f"Download failed: {self.last_download_error}")
             return None
 
     def apply_update(self, downloaded_exe_path):
@@ -1415,6 +1444,10 @@ def get_debug_info():
         debug_info['dependencies']['yt-dlp'] = yt_dlp.version.__version__
     except Exception as e:
         debug_info['dependencies']['yt-dlp'] = f"Error: {str(e)}"
+
+    # Which CA store HTTPS verification uses — a missing certifi bundle
+    # breaks downloads on machines whose OS store holds an expired root
+    debug_info['dependencies']['CA store'] = get_ca_source()
     
     # Check ffmpeg
     ffmpeg_exe = get_ffmpeg_path()
