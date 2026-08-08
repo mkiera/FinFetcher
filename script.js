@@ -1403,6 +1403,57 @@ async function saveDownloadSettings() {
     }
 }
 
+// --- Modal dismissal ---
+
+// Escape and a backdrop click close any dismissible modal. Without these the
+// only way out of the settings panel is its ✕, which scrolls off the top on a
+// long section. The update modal is deliberately excluded: the app is exiting
+// to swap its own exe behind it, so there is nothing to go back to.
+const DISMISSIBLE_MODALS = ['playlistModal', 'streamModal', 'debugPanel', 'settingsModal'];
+
+function dismissModal(id) {
+    switch (id) {
+        case 'streamModal':
+            closeStream();
+            return true;
+        case 'debugPanel':
+            toggleDebug();
+            return true;
+        case 'settingsModal':
+            toggleSettings();
+            return true;
+        case 'playlistModal':
+            // Backing out of the prompt has to release the Download button,
+            // which initiateDownload disabled before opening it
+            document.getElementById('playlistModal').classList.add('hidden');
+            resetUI();
+            return true;
+    }
+    return false;
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    // Leaving fullscreen video already consumes Escape; closing the player in
+    // the same keypress would be one dismissal too many
+    if (document.fullscreenElement) return;
+
+    const open = DISMISSIBLE_MODALS.find(id => {
+        const el = document.getElementById(id);
+        return el && !el.classList.contains('hidden');
+    });
+    if (open) dismissModal(open);
+});
+
+DISMISSIBLE_MODALS.forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('click', (e) => {
+        // Only the backdrop itself — a click inside the panel must not close it
+        if (e.target === el) dismissModal(id);
+    });
+});
+
 // --- Debug Panel ---
 
 let lastError = null;
