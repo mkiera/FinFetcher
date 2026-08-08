@@ -1273,20 +1273,27 @@ header {
 }
 
 /* The settings panel scrolls, and the Downloads section is well over twice its
-   height — a static header would carry the close button off the top of the
-   screen with no way back to it. Sticking it to the top keeps the ✕ reachable
-   at any scroll position. The negative margins let it cover the panel's own
-   padding, so content passing underneath is never visible around its edges. */
-.settings-modal .settings-header {
+   height. Anything the user needs in order to leave — the ✕ and the section
+   tabs — has to stay put, or scrolling down strands them in a panel with no
+   way back to the other tab and no way out. Pinning the title and the tabs
+   together keeps both reachable at any scroll position. The negative margins
+   let the block cover the panel's own padding, so content passing underneath
+   is never visible around its edges. */
+.settings-sticky-top {
     position: sticky;
     top: -24px;
     z-index: 5;
     margin: -24px -24px 20px;
-    padding: 24px 24px 12px;
+    padding: 24px 24px 4px;
     background: var(--glass-bg);
     backdrop-filter: blur(20px);
     -webkit-backdrop-filter: blur(20px);
     border-radius: 24px 24px 0 0;
+}
+
+/* Already spaced by the sticky block's own padding */
+.settings-sticky-top .settings-header {
+    margin-bottom: 16px;
 }
 
 .settings-header h2 {

@@ -282,20 +282,28 @@
     <!-- Settings Modal -->
     <div id="settingsModal" class="modal hidden">
         <div class="modal-content glass-panel settings-modal">
-            <div class="settings-header">
-                <h2>⚙️ Settings</h2>
-                <button class="stream-close-btn" onclick="toggleSettings()">✕</button>
+            <!-- Title and section tabs stay pinned: the Downloads section is
+                 more than twice the panel's height, and if these scroll away
+                 there is no route back to the other tab or out of the panel. -->
+            <div class="settings-sticky-top">
+                <div class="settings-header">
+                    <h2>⚙️ Settings</h2>
+                    <button class="stream-close-btn" onclick="toggleSettings()">✕</button>
+                </div>
+
+                <!-- These deliberately do not share a click handler with the
+                     update-channel tabs below, because switching channel
+                     persists the choice as a side effect. -->
+                <div class="settings-tabs section-tabs">
+                    <button class="settings-tab active" data-section="updates"
+                        onclick="switchSettingsSection('updates')">Updates</button>
+                    <button class="settings-tab" data-section="downloads"
+                        onclick="switchSettingsSection('downloads')">Downloads</button>
+                </div>
             </div>
 
-            <!-- General Settings -->
-            <div class="settings-section">
-                <div class="toggle-row">
-                    <span>Log to File</span>
-                    <label class="switch small">
-                        <input type="checkbox" id="logToggle">
-                        <span class="slider round"></span>
-                    </label>
-                </div>
+            <!-- Updates: channel tabs + release list -->
+            <div class="settings-section" id="settingsSectionUpdates">
                 <div class="toggle-row">
                     <span>Auto-check for Updates</span>
                     <label class="switch small">
@@ -303,22 +311,9 @@
                         <span class="slider round"></span>
                     </label>
                 </div>
-            </div>
 
-            <div class="settings-divider"></div>
+                <div class="settings-divider"></div>
 
-            <!-- Top-level sections. These deliberately do not share a click handler
-                 with the update-channel tabs below, because switching channel
-                 persists the choice as a side effect. -->
-            <div class="settings-tabs section-tabs">
-                <button class="settings-tab active" data-section="updates"
-                    onclick="switchSettingsSection('updates')">Updates</button>
-                <button class="settings-tab" data-section="downloads"
-                    onclick="switchSettingsSection('downloads')">Downloads</button>
-            </div>
-
-            <!-- Updates: channel tabs + release list -->
-            <div class="settings-section" id="settingsSectionUpdates">
                 <div class="settings-tabs">
                     <button class="settings-tab active" data-channel="stable"
                         onclick="switchUpdateTab('stable')">Stable</button>
@@ -367,6 +362,17 @@
                     </div>
                     <input type="number" id="rateLimitKbps" class="settings-number" min="0"
                         onchange="saveDownloadSettings()">
+                </div>
+
+                <div class="toggle-row">
+                    <div class="settings-label">
+                        <span>Log to File</span>
+                        <span class="settings-hint">Writes download_log.txt beside the downloaded files.</span>
+                    </div>
+                    <label class="switch small">
+                        <input type="checkbox" id="logToggle">
+                        <span class="slider round"></span>
+                    </label>
                 </div>
 
                 <div class="toggle-row">
