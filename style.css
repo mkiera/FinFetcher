@@ -1285,9 +1285,15 @@ header {
     z-index: 5;
     margin: -24px -24px 20px;
     padding: 24px 24px 4px;
-    background: var(--glass-bg);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    /* Opaque on purpose. --glass-bg is 5% white, and backdrop-filter does not
+       blur content scrolling underneath a sticky element in WebView2, so a
+       glass background here let the settings show straight through the title
+       and tabs. This is what the panel composites to over the modal overlay
+       (#0D1B2A under rgba(0,0,0,.6), then 5% white), so it reads as the same
+       surface while actually hiding what passes behind it. */
+    background: #12171D;
+    border-bottom: 1px solid var(--glass-border);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35);
     border-radius: 24px 24px 0 0;
 }
 
