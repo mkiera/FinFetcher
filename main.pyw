@@ -18,6 +18,7 @@ import zipfile
 import tempfile
 import shutil
 import yt_dlp
+from yt_dlp.utils import download_range_func
 from flask import Flask, request, jsonify, send_from_directory, Response
 from urllib.request import urlopen, Request
 from urllib.error import URLError
@@ -657,6 +658,215 @@ del /f "%~f0" 2>NUL
 update_manager = UpdateManager()
 
 
+# ============ App Settings ============
+
+class AppSettings:
+    """Stores the download preferences the Settings panel exposes.
+
+    Shares config.json with FFmpegManager and UpdateManager, so it follows the
+    same rule as UpdateManager._save_config: read the file, write back only
+    the keys this class owns, leave everything else exactly as found.
+    """
+
+    # The whole settings contract, key -> default. Iteration order is the
+    # order the API hands back, and CONFIG_KEYS is derived from it so the
+    # write whitelist can never drift away from the schema.
+    DEFAULTS = {
+        'concurrent_fragments': 4,
+        'rate_limit_kbps': 0,
+        # Off by default: yt-dlp's archive key is extractor+id only, so an
+        # entry fetched as audio counts as "done" for a later video run.
+        # Opting in has to be a deliberate choice.
+        'use_download_archive': False,
+        # On by default so trimming stays frame-accurate, as it was before
+        # range downloads. Turning it off snaps cuts to the nearest keyframe
+        # (faster, no re-encode at the boundaries).
+        'precise_trim': True,
+        'container': 'mp4',
+        'audio_format': 'mp3',
+        'audio_quality': '0',
+        'subtitles_enabled': False,
+        'subtitle_langs': 'en',
+        'subtitles_auto': False,
+        'embed_subtitles': True,
+        'sponsorblock_enabled': False,
+        'sponsorblock_categories': ['sponsor', 'selfpromo', 'interaction'],
+        'embed_thumbnail': True,
+        'embed_metadata': True,
+        'embed_chapters': True,
+        'split_chapters': False,
+    }
+
+    CONFIG_KEYS = tuple(DEFAULTS)
+
+    CONTAINERS = ('mp4', 'mkv', 'webm')
+    AUDIO_FORMATS = ('mp3', 'm4a', 'opus', 'flac', 'wav')
+    # Every category yt-dlp's SponsorBlock post-processor understands
+    SPONSORBLOCK_CATEGORIES = (
+        'sponsor', 'intro', 'outro', 'selfpromo', 'preview',
+        'filler', 'interaction', 'music_offtopic', 'poi_highlight',
+    )
+    MAX_CONCURRENT_FRAGMENTS = 16
+    # 1 GB/s. Not a real constraint, just a ceiling so a mistyped value
+    # can't turn into a nonsense byte rate.
+    MAX_RATE_LIMIT_KBPS = 1024 * 1024
+
+    def __init__(self):
+        self._config_file = os.path.join(FFmpegManager.get_app_data_dir(), 'config.json')
+        self._config = self._load_config()
+
+    def _load_config(self):
+        """Load the shared config file."""
+        try:
+            if os.path.exists(self._config_file):
+                with open(self._config_file, 'r') as f:
+                    config = json.load(f)
+                    if isinstance(config, dict):
+                        return config
+        except Exception:
+            pass
+        return {}
+
+    def _save_config(self):
+        """Save these settings back to the shared config file."""
+        try:
+            existing = {}
+            if os.path.exists(self._config_file):
+                try:
+                    with open(self._config_file, 'r') as f:
+                        existing = json.load(f)
+                    if not isinstance(existing, dict):
+                        existing = {}
+                except Exception:
+                    existing = {}
+            # Only write back our own keys — ffmpeg_path and the update keys
+            # live in this file too and self._config is a startup snapshot of
+            # the whole thing, which would restore stale values for them.
+            for key in self.CONFIG_KEYS:
+                if key in self._config:
+                    existing[key] = self._config[key]
+            with open(self._config_file, 'w') as f:
+                json.dump(existing, f)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _as_bool(value, fallback):
+        """Coerce a checkbox value; JSON may carry it as a string or number."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ('true', '1', 'yes', 'on'):
+                return True
+            if lowered in ('false', '0', 'no', 'off'):
+                return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return fallback
+
+    @staticmethod
+    def _as_int(value, fallback, minimum, maximum):
+        """Coerce to an int and clamp it into range."""
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return fallback
+        return max(minimum, min(maximum, number))
+
+    @staticmethod
+    def _as_audio_quality(value, fallback):
+        """Normalise yt-dlp's preferredquality to a plain digit string.
+
+        It is either a VBR level (0-10) or a kbps bitrate, and it ends up in
+        an ffmpeg argument, so rebuild it from an int rather than passing
+        whatever the caller sent.
+        """
+        try:
+            quality = int(str(value).strip())
+        except (TypeError, ValueError):
+            return fallback
+        if 0 <= quality <= 320:
+            return str(quality)
+        return fallback
+
+    @staticmethod
+    def _as_lang_list(value, fallback):
+        """Sanitise the comma-separated subtitle languages.
+
+        This string is handed to yt-dlp's subtitleslangs as-is, so restrict it
+        to language-tag characters instead of trusting the caller.
+        """
+        if not isinstance(value, str):
+            return fallback
+        langs = []
+        for lang in value.split(','):
+            lang = lang.strip()
+            if not lang or lang in langs:
+                continue
+            if all(c.isascii() and (c.isalnum() or c in '-_.*') for c in lang):
+                langs.append(lang)
+        # An emptied box would silently mean "no languages", which makes the
+        # subtitles toggle do nothing — keep the last usable value instead.
+        return ','.join(langs) if langs else fallback
+
+    def _coerce(self, key, value, fallback):
+        """Validate one setting, returning fallback when it is unusable."""
+        if key == 'concurrent_fragments':
+            return self._as_int(value, fallback, 1, self.MAX_CONCURRENT_FRAGMENTS)
+        if key == 'rate_limit_kbps':
+            return self._as_int(value, fallback, 0, self.MAX_RATE_LIMIT_KBPS)
+        if key == 'container':
+            return value if value in self.CONTAINERS else fallback
+        if key == 'audio_format':
+            return value if value in self.AUDIO_FORMATS else fallback
+        if key == 'audio_quality':
+            return self._as_audio_quality(value, fallback)
+        if key == 'subtitle_langs':
+            return self._as_lang_list(value, fallback)
+        if key == 'sponsorblock_categories':
+            if not isinstance(value, list):
+                return list(fallback)
+            # Unknown categories would make yt-dlp reject the whole run
+            cleaned = []
+            for category in value:
+                if category in self.SPONSORBLOCK_CATEGORIES and category not in cleaned:
+                    cleaned.append(category)
+            return cleaned
+        # Everything else in the contract is a checkbox
+        return self._as_bool(value, fallback)
+
+    def _normalise(self, raw, base=None):
+        """Build the full settings set from raw values, validating each one."""
+        if base is None:
+            base = self.DEFAULTS
+        return {key: self._coerce(key, raw.get(key, base[key]), base[key])
+                for key in self.DEFAULTS}
+
+    def get_settings(self):
+        """Return the full settings contract with defaults applied."""
+        return self._normalise(self._config)
+
+    def save_settings(self, settings):
+        """Merge a partial settings object in and persist it.
+
+        Unknown keys are ignored, and a value that fails validation keeps
+        whatever was stored before rather than snapping back to the default.
+        """
+        current = self.get_settings()
+        if not isinstance(settings, dict):
+            return current
+        incoming = {key: settings[key] for key in self.DEFAULTS if key in settings}
+        merged = self._normalise({**current, **incoming}, base=current)
+        self._config.update(merged)
+        self._save_config()
+        return merged
+
+
+# Global AppSettings instance
+settings_manager = AppSettings()
+
+
 class Api:
     """PyWebView API for native dialog access."""
     def select_folder(self):
@@ -1108,6 +1318,23 @@ def update_artifacts():
 
     except Exception as e:
         return jsonify({'error': str(e), 'artifacts': [], 'current_version': current_version})
+
+
+# ============ Settings API Endpoints ============
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+def app_settings():
+    """Get or set the download preferences."""
+    if request.method == 'GET':
+        return jsonify(settings_manager.get_settings())
+    # A partial object is the normal case — the UI posts only what changed.
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        # Reporting success for a write that never happened is how a setting
+        # silently fails to stick.
+        return jsonify({'success': False, 'error': 'Expected a JSON object'}), 400
+    settings = settings_manager.save_settings(data)
+    return jsonify({'success': True, 'settings': settings})
 
 
 _cookie_opts_cache = None
@@ -1578,6 +1805,177 @@ def get_stream_url():
         return jsonify({'error': str(e)}), 500
 
 
+def apply_performance_opts(ydl_opts, settings, download_type, save_path):
+    """Fold the performance settings into a yt-dlp options dict, in place.
+
+    Split out of download() so the option assembly stays readable as more
+    settings get wired in.
+    """
+    fragments = settings['concurrent_fragments']
+    ydl_opts['concurrent_fragment_downloads'] = fragments
+
+    # The UI collects KB/s; yt-dlp wants bytes/sec. A present-but-zero
+    # ratelimit is worse than no limit — yt-dlp divides by it — so an
+    # unlimited setting has to leave the key out entirely.
+    rate_limit_kbps = settings['rate_limit_kbps']
+    if rate_limit_kbps > 0:
+        # The limit is applied per download thread, so N parallel fragments
+        # would otherwise let the total run at N times the cap.
+        ydl_opts['ratelimit'] = max(1, rate_limit_kbps * 1024 // max(1, fragments))
+
+    # The archive lets a re-run of a playlist skip what it already fetched.
+    # Never for a single video: there the user asked for this one file, and
+    # a second attempt would silently do nothing.
+    #
+    # It lives beside the files it describes rather than in one global list,
+    # because the archive key is only extractor+id: a shared file would make
+    # a playlist already saved to one folder look "done" for every other
+    # folder, mode and quality too.
+    if settings['use_download_archive'] and download_type != 'single':
+        ydl_opts['download_archive'] = os.path.join(save_path, '.finfetcher-archive.txt')
+
+
+# Containers EmbedThumbnailPP can actually hold a cover image in. It raises
+# EmbedThumbnailPPError for anything else, which aborts a finished download,
+# so webm and wav have to skip the post-processor rather than attempt it.
+# opus and flac go exclusively through mutagen, so they are only safe when
+# that import actually resolved — in a build without it, embedding would
+# fail a download that had already finished.
+def _embeddable_thumbnail_exts():
+    exts = ['mp4', 'mkv', 'm4a', 'mp3']
+    try:
+        from yt_dlp.dependencies import mutagen as _mutagen
+    except Exception:
+        _mutagen = None
+    if _mutagen is not None:
+        exts += ['opus', 'flac']
+    return tuple(exts)
+
+
+EMBEDDABLE_THUMBNAIL_EXTS = _embeddable_thumbnail_exts()
+# FFmpegEmbedSubtitlePP.SUPPORTED_EXTS, minus the ones this app never produces
+EMBEDDABLE_SUBTITLE_EXTS = ('mp4', 'mkv', 'webm', 'm4a')
+
+
+def _is_partial_download_refusal(error_payload):
+    """True when a failed attempt failed *because* a range was requested.
+
+    yt-dlp's two refusals are worded in YoutubeDL.py:3442-3443. Anything else
+    (403, geo-block, dropped connection) is a real error and must not be
+    retried as a full download.
+    """
+    message = (error_payload or {}).get('error') or ''
+    return ('cannot be partially downloaded' in message
+            or 'partially, but ffmpeg is not installed' in message)
+
+
+def apply_media_opts(ydl_opts, settings, mode, save_path, fast_trim=False):
+    """Fold the media settings into a yt-dlp options dict, in place.
+
+    fast_trim means the file will contain only a slice of the source. Every
+    timestamp yt-dlp carries — chapter marks, SponsorBlock segments — still
+    refers to the full video, so anything that cuts or labels by those times
+    is skipped for that run rather than applied at the wrong offsets.
+
+    The post-processor chain is built in the same order yt-dlp's own CLI
+    builds it (get_postprocessors in yt_dlp/__init__.py): SponsorBlock,
+    FFmpegExtractAudio, FFmpegEmbedSubtitle, ModifyChapters, FFmpegMetadata,
+    EmbedThumbnail, FFmpegSplitChapters. That order is load-bearing, not
+    cosmetic — ModifyChapters physically cuts the file, so a cover image or a
+    chapter list written before it would describe timings that no longer
+    exist, and subtitles have to be inside the container before it cuts.
+
+    Whatever the mode-specific block already put in ydl_opts (the audio
+    extraction) keeps its own slot in that sequence.
+    """
+    # The extension the file will have by the time the post-processors run
+    target_ext = settings['audio_format'] if mode == 'audio' else settings['container']
+
+    if settings['subtitles_enabled']:
+        ydl_opts['writesubtitles'] = True
+        ydl_opts['writeautomaticsub'] = settings['subtitles_auto']
+        ydl_opts['subtitleslangs'] = [lang for lang in settings['subtitle_langs'].split(',') if lang]
+
+    # SponsorBlock reads an empty category list as "every category", so an
+    # enabled toggle with nothing ticked has to count as off. On a trimmed
+    # download its segment times address the untrimmed timeline, so it would
+    # cut the wrong parts out of the clip.
+    sponsor_categories = (settings['sponsorblock_categories']
+                          if settings['sponsorblock_enabled'] and not fast_trim else [])
+
+    # Same reasoning for chapters: the marks and the split points belong to
+    # the full video, not to the slice that was actually downloaded.
+    embed_chapters = settings['embed_chapters'] and not fast_trim
+    split_chapters = settings['split_chapters'] and not fast_trim
+
+    embed_thumbnail = settings['embed_thumbnail'] and target_ext in EMBEDDABLE_THUMBNAIL_EXTS
+    if embed_thumbnail:
+        # The image has to be on disk before EmbedThumbnail can read it
+        ydl_opts['writethumbnail'] = True
+
+    postprocessors = []
+    if sponsor_categories:
+        # Only tags the segments — ModifyChapters below is what cuts them out.
+        # after_filter so the segments are known before anything writes chapters.
+        postprocessors.append({
+            'key': 'SponsorBlock',
+            'categories': sponsor_categories,
+            'when': 'after_filter',
+        })
+    postprocessors.extend(ydl_opts.get('postprocessors', []))
+    if (settings['subtitles_enabled'] and settings['embed_subtitles']
+            and target_ext in EMBEDDABLE_SUBTITLE_EXTS):
+        postprocessors.append({
+            'key': 'FFmpegEmbedSubtitle',
+            # False lets the sidecar files go once they are in the container,
+            # which is the difference between "embed" and "leave as sidecar"
+            'already_have_subtitle': False,
+        })
+    if sponsor_categories:
+        postprocessors.append({
+            'key': 'ModifyChapters',
+            'remove_sponsor_segments': sponsor_categories,
+            'force_keyframes': settings['precise_trim'],
+        })
+    if settings['embed_metadata'] or embed_chapters:
+        postprocessors.append({
+            'key': 'FFmpegMetadata',
+            'add_metadata': settings['embed_metadata'],
+            'add_chapters': embed_chapters,
+            # This app never writes an .info.json, so there is none to attach
+            'add_infojson': False,
+        })
+    if embed_thumbnail:
+        postprocessors.append({
+            'key': 'EmbedThumbnail',
+            # False deletes the downloaded image once it is embedded
+            'already_have_thumbnail': False,
+        })
+    if split_chapters:
+        postprocessors.append({
+            'key': 'FFmpegSplitChapters',
+            'force_keyframes': settings['precise_trim'],
+        })
+
+    if postprocessors:
+        ydl_opts['postprocessors'] = postprocessors
+
+    # outtmpl only has to become a dict when one of these secondary templates
+    # is in play, so leave it the plain string it is today otherwise.
+    extra_outtmpl = {}
+    if embed_thumbnail:
+        # A playlist's own thumbnail belongs to no file we embed into, so
+        # writethumbnail would just strand an image in the download folder.
+        extra_outtmpl['pl_thumbnail'] = ''
+    if split_chapters:
+        # yt-dlp's built-in chapter template carries no directory, so without
+        # this the pieces land in the working directory, not the save folder.
+        extra_outtmpl['chapter'] = os.path.join(
+            save_path, '%(title)s - %(section_number)03d %(section_title)s.%(ext)s')
+    if extra_outtmpl:
+        ydl_opts['outtmpl'] = {'default': ydl_opts['outtmpl'], **extra_outtmpl}
+
+
 @app.route('/api/download', methods=['POST'])
 def download():
     """API endpoint to initiate download with yt-dlp Python API."""
@@ -1617,14 +2015,35 @@ def download():
     if ffmpeg_dir:
         ydl_opts['ffmpeg_location'] = ffmpeg_dir
 
+    # Saved preferences from the Settings panel
+    settings = settings_manager.get_settings()
+    apply_performance_opts(ydl_opts, settings, download_type, save_path)
+
+    # Trim planning. parse_timestamp() is the one parser for these values —
+    # it already rejects negatives and malformed input.
+    trim_requested = bool(trim_start and trim_end)
+    start_sec, end_sec = parse_timestamp(trim_start), parse_timestamp(trim_end)
+    trim_range_ok = (start_sec is not None and end_sec is not None
+                     and end_sec > start_sec)
+    # Playlists are excluded because there is no single file to cut; a stale
+    # checkbox used to re-encode whichever entry finished last.
+    fast_trim = trim_requested and trim_range_ok and download_type == 'single'
+
+    if fast_trim:
+        # Ask the extractor for just the requested range instead of pulling
+        # the whole video and re-encoding it afterwards. Sources that cannot
+        # serve a partial download fall back to the ffmpeg trim below.
+        ydl_opts['download_ranges'] = download_range_func(None, [(start_sec, end_sec)])
+        ydl_opts['force_keyframes_at_cuts'] = settings['precise_trim']
+
     # Mode-specific options
     if mode == 'audio':
         ydl_opts.update({
             'format': 'bestaudio/best',
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '0',
+                'preferredcodec': settings['audio_format'],
+                'preferredquality': settings['audio_quality'],
             }],
         })
     else:
@@ -1639,10 +2058,22 @@ def download():
             except:
                 pass
         
+        # webm cannot hold H.264/AAC, and yt-dlp will still try to mux into
+        # it rather than pick something workable, failing the download. The
+        # "/mkv" fallback gives it somewhere to land. mp4 needs no fallback —
+        # it muxes vp9+opus fine — and adding one would silently turn mp4
+        # downloads into mkv.
+        container = settings['container']
+        merge_format = 'webm/mkv' if container == 'webm' else container
+
         ydl_opts.update({
             'format': format_spec,
-            'merge_output_format': 'mp4',
+            'merge_output_format': merge_format,
         })
+
+    # Post-processors last: the chain has to wrap whichever extraction the
+    # mode block just chose.
+    apply_media_opts(ydl_opts, settings, mode, save_path, fast_trim=fast_trim)
 
     # Queues for communicating with thread
     msg_queue = queue.Queue()
@@ -1679,22 +2110,31 @@ def download():
     
     ydl_opts['postprocessor_hooks'] = [postprocessor_hook]
 
-    def run_download_thread():
+    def run_download_thread(opts):
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
             result_queue.put({'success': True})
         except Exception as e:
             result_queue.put({'success': False, 'error': str(e)})
 
     try:
-        def generate():
+        def run_attempt(opts):
+            """Run one download to completion, streaming its logs as SSE.
+
+            A sub-generator, so the caller can `yield from` it and still get a
+            result back — the trim fallback has to know whether an attempt
+            produced a file before it decides to try again. The failure
+            payload is returned rather than yielded so a retried attempt does
+            not report an error the user never needs to see.
+            """
             # Start download thread
-            t = threading.Thread(target=run_download_thread, daemon=True)
+            t = threading.Thread(target=run_download_thread, args=(opts,), daemon=True)
             t.start()
-            
+
             final_file = None
             download_success = False
+            error_payload = None
 
             # Monitor progress
             while True:
@@ -1728,10 +2168,10 @@ def download():
                         if 'success' in res:
                             download_success = res['success']
                             if not res['success']:
-                                yield f"data: {json.dumps({'error': res.get('error')})}\n\n"
+                                error_payload = {'error': res.get('error')}
                 except queue.Empty:
                     pass
-                
+
                 # Avoid busy wait
                 time.sleep(0.1)
 
@@ -1748,15 +2188,38 @@ def download():
                     if 'success' in res:
                         download_success = res['success']
                         if not res['success']:
-                            yield f"data: {json.dumps({'error': res.get('error')})}\n\n"
+                            error_payload = {'error': res.get('error')}
             except queue.Empty:
                 pass
-            
-            # Post-download trimming (if requested)
-            can_trim = bool(trim_start and trim_end and download_success and final_file)
-            start_sec, end_sec = parse_timestamp(trim_start), parse_timestamp(trim_end)
-            trim_range_ok = (start_sec is not None and end_sec is not None
-                             and end_sec > start_sec)
+
+            return final_file, download_success, error_payload
+
+        def generate():
+            trimmed_on_download = False
+            final_file, download_success, error_payload = yield from run_attempt(ydl_opts)
+
+            if fast_trim:
+                if download_success and final_file:
+                    trimmed_on_download = True
+                    cut = 'exact cut' if settings['precise_trim'] else 'cut at the nearest keyframes'
+                    yield f"data: {json.dumps({'log': f'> [FinFetcher] Fast trim: downloaded only {trim_start} to {trim_end} ({cut}).'})}\n\n"
+                elif _is_partial_download_refusal(error_payload):
+                    # This source cannot serve a range, so fetch the whole
+                    # thing and hand the cut to ffmpeg below. Only for this
+                    # specific refusal — retrying a 403 or a dropped
+                    # connection would re-download the video for nothing and
+                    # blame the wrong thing while doing it.
+                    yield f"data: {json.dumps({'log': '> [FinFetcher] Fast trim unavailable for this source — downloading in full and trimming with ffmpeg.'})}\n\n"
+                    ydl_opts.pop('download_ranges', None)
+                    ydl_opts.pop('force_keyframes_at_cuts', None)
+                    final_file, download_success, error_payload = yield from run_attempt(ydl_opts)
+
+            if error_payload:
+                yield f"data: {json.dumps(error_payload)}\n\n"
+
+            # Post-download trimming (only when the download could not do it)
+            can_trim = bool(trim_requested and download_success and final_file
+                            and not trimmed_on_download)
 
             if can_trim and download_type != 'single':
                 # A playlist has no single file to trim — the stale checkbox
@@ -1766,7 +2229,7 @@ def download():
                 yield f"data: {json.dumps({'log': f'> [FinFetcher] Invalid trim range ({trim_start} to {trim_end}) — keeping the full download.'})}\n\n"
             elif can_trim:
                 try:
-                    yield f"data: {json.dumps({'log': f'> [FinFetcher] Trimming video from {trim_start} to {trim_end}...'})}\n\n"
+                    yield f"data: {json.dumps({'log': f'> [FinFetcher] Trimming video from {trim_start} to {trim_end} with ffmpeg (re-encode)...'})}\n\n"
                     
                     base, ext = os.path.splitext(final_file)
                     trimmed_file = f"{base}_trimmed{ext}"
@@ -1807,17 +2270,23 @@ def download():
                             '-to', trim_end,
                         ] + audio_codec + [trimmed_file]
                     else:
-                        # Video trimming - use video and audio codecs
+                        # Video trimming - codecs have to suit the container,
+                        # which is now user-selectable: webm cannot hold
+                        # H.264/AAC, so the old fixed command failed on it.
+                        if ext.lower() == '.webm':
+                            video_codec = ['-c:v', 'libvpx-vp9', '-crf', '31', '-b:v', '0',
+                                           '-c:a', 'libopus', '-b:a', '128k']
+                        else:
+                            video_codec = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
+                                           '-c:a', 'aac', '-b:a', '192k',
+                                           '-strict', 'experimental']
+
                         ffmpeg_cmd = [
                             ffmpeg_exe, '-y',
                             '-i', final_file,
                             '-ss', trim_start,
                             '-to', trim_end,
-                            '-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
-                            '-c:a', 'aac', '-b:a', '192k',
-                            '-strict', 'experimental',
-                            trimmed_file
-                        ]
+                        ] + video_codec + [trimmed_file]
                     
                     environ = os.environ.copy()
                     environ["PYTHONDONTWRITEBYTECODE"] = "1"

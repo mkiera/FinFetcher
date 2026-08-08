@@ -2,3 +2,4 @@ flask
 pywebview
 yt-dlp
 certifi
+mutagen

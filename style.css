@@ -1250,6 +1250,19 @@ header {
     width: 95%;
     padding: 24px;
     text-align: left;
+    /* .modal centres its content without scrolling, so a section taller than
+       the window would have its bottom rows clipped off entirely */
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.settings-modal::-webkit-scrollbar {
+    width: 5px;
+}
+
+.settings-modal::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
 }
 
 .settings-header {
@@ -1315,6 +1328,139 @@ header {
     background: rgba(74, 144, 164, 0.3);
     color: white;
     box-shadow: none;
+}
+
+/* The top-level section strip sits directly above the update-channel strip, so
+   it is a size up to read as the outer level rather than a second channel row */
+.settings-tabs.section-tabs {
+    margin-bottom: 16px;
+}
+
+.settings-tabs.section-tabs .settings-tab {
+    padding: 10px 12px;
+    font-size: 0.85rem;
+}
+
+/* === Settings Controls === */
+.settings-label {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding-right: 14px;
+}
+
+.settings-hint {
+    font-size: 0.72rem;
+    line-height: 1.35;
+    color: rgba(255, 255, 255, 0.4);
+}
+
+/* The global input styling only covers type="text", so number fields would
+   otherwise fall back to the browser's light-themed default */
+.settings-number {
+    width: 84px;
+    flex-shrink: 0;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--glass-border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    color: white;
+    font-family: var(--font-main);
+    font-size: 0.85rem;
+    text-align: right;
+    transition: all 0.3s ease;
+}
+
+.settings-number:focus {
+    outline: none;
+    border-color: var(--accent-glow);
+}
+
+.settings-section .toggle-row .switch {
+    flex-shrink: 0;
+}
+
+.settings-subheading {
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: rgba(255, 255, 255, 0.45);
+    margin-bottom: 12px;
+}
+
+/* Names the download mode a group actually applies to, so the audio and video
+   options are not read as one set that governs every download */
+.settings-mode-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    background: rgba(107, 197, 210, 0.18);
+    color: var(--accent-glow);
+    font-size: 0.6rem;
+    font-weight: 600;
+    letter-spacing: 0.3px;
+    vertical-align: middle;
+}
+
+/* Carries the greyed-out look only — the controls inside are disabled in JS */
+.settings-subgroup.disabled {
+    opacity: 0.4;
+}
+
+.settings-subgroup.disabled .slider,
+.settings-subgroup.disabled .category-chip,
+.settings-subgroup.disabled .category-chip input {
+    cursor: default;
+}
+
+.settings-section select:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+/* Sized to match .settings-number — the global input[type="text"] rule is built
+   for the URL bar and would otherwise take up the whole row */
+input.settings-text {
+    width: 110px;
+    flex-shrink: 0;
+    padding: 6px 10px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    text-align: right;
+}
+
+/* === SponsorBlock Categories === */
+.category-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 14px;
+}
+
+.category-chip {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--glass-border);
+    border-radius: 20px;
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.75);
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.category-chip:hover {
+    background: rgba(255, 255, 255, 0.08);
+}
+
+.category-chip input {
+    margin: 0;
+    accent-color: var(--accent-color);
+    cursor: pointer;
 }
 
 /* === Releases List === */

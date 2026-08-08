@@ -307,8 +307,18 @@
 
             <div class="settings-divider"></div>
 
-            <!-- Update Channel Tabs -->
-            <div class="settings-section">
+            <!-- Top-level sections. These deliberately do not share a click handler
+                 with the update-channel tabs below, because switching channel
+                 persists the choice as a side effect. -->
+            <div class="settings-tabs section-tabs">
+                <button class="settings-tab active" data-section="updates"
+                    onclick="switchSettingsSection('updates')">Updates</button>
+                <button class="settings-tab" data-section="downloads"
+                    onclick="switchSettingsSection('downloads')">Downloads</button>
+            </div>
+
+            <!-- Updates: channel tabs + release list -->
+            <div class="settings-section" id="settingsSectionUpdates">
                 <div class="settings-tabs">
                     <button class="settings-tab active" data-channel="stable"
                         onclick="switchUpdateTab('stable')">Stable</button>
@@ -332,6 +342,253 @@
                     </button>
                 </div>
                 <div id="updateCheckStatus" class="update-check-status"></div>
+            </div>
+
+            <!-- Downloads: yt-dlp behaviour, saved via /api/settings -->
+            <div class="settings-section hidden" id="settingsSectionDownloads">
+                <div id="downloadSettingsStatus" class="update-check-status hidden"></div>
+
+                <h3 class="settings-subheading">Transfer</h3>
+
+                <div class="control-row">
+                    <div class="settings-label">
+                        <span>Concurrent fragments</span>
+                        <span class="settings-hint">Parallel chunks per download. Higher is faster but heavier on
+                            your connection.</span>
+                    </div>
+                    <input type="number" id="concurrentFragments" class="settings-number" min="1" max="16"
+                        onchange="saveDownloadSettings()">
+                </div>
+
+                <div class="control-row">
+                    <div class="settings-label">
+                        <span>Speed limit (KB/s)</span>
+                        <span class="settings-hint">0 means unlimited.</span>
+                    </div>
+                    <input type="number" id="rateLimitKbps" class="settings-number" min="0"
+                        onchange="saveDownloadSettings()">
+                </div>
+
+                <div class="toggle-row">
+                    <div class="settings-label">
+                        <span>Use download archive</span>
+                        <span class="settings-hint">Skips playlist items you have already downloaded before.</span>
+                    </div>
+                    <label class="switch small">
+                        <input type="checkbox" id="downloadArchiveToggle" onchange="saveDownloadSettings()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="toggle-row">
+                    <div class="settings-label">
+                        <span>Precise trim</span>
+                        <span class="settings-hint">Slower, re-encodes the cut points for a frame-accurate
+                            trim.</span>
+                    </div>
+                    <label class="switch small">
+                        <input type="checkbox" id="preciseTrimToggle" onchange="saveDownloadSettings()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="settings-divider"></div>
+
+                <h3 class="settings-subheading">Video output <span class="settings-mode-tag">Video mode</span></h3>
+
+                <div class="control-row">
+                    <div class="settings-label">
+                        <span>Container</span>
+                        <span class="settings-hint">mkv holds almost any stream as-is; mp4 is the most portable but
+                            sometimes has to re-encode to fit one in.</span>
+                    </div>
+                    <select id="containerSelect" onchange="saveDownloadSettings()">
+                        <option value="mp4">mp4</option>
+                        <option value="mkv">mkv</option>
+                        <option value="webm">webm</option>
+                    </select>
+                </div>
+
+                <div class="settings-divider"></div>
+
+                <h3 class="settings-subheading">Audio output <span class="settings-mode-tag">Audio mode</span></h3>
+
+                <div class="control-row">
+                    <div class="settings-label">
+                        <span>Format</span>
+                        <span class="settings-hint">What audio-only downloads are converted to.</span>
+                    </div>
+                    <select id="audioFormatSelect" onchange="saveDownloadSettings()">
+                        <option value="mp3">mp3</option>
+                        <option value="m4a">m4a</option>
+                        <option value="opus">opus</option>
+                        <option value="flac">flac</option>
+                        <option value="wav">wav</option>
+                    </select>
+                </div>
+
+                <div class="control-row">
+                    <div class="settings-label">
+                        <span>Quality</span>
+                        <span class="settings-hint" id="audioQualityHint">Lower quality means a smaller file.</span>
+                    </div>
+                    <select id="audioQualitySelect" onchange="saveDownloadSettings()">
+                        <option value="0">Best</option>
+                        <option value="2">High</option>
+                        <option value="5">Medium</option>
+                        <option value="7">Low</option>
+                        <option value="9">Smallest</option>
+                    </select>
+                </div>
+
+                <div class="settings-divider"></div>
+
+                <h3 class="settings-subheading">Subtitles</h3>
+
+                <div class="toggle-row">
+                    <div class="settings-label">
+                        <span>Download subtitles</span>
+                        <span class="settings-hint">Fetches subtitle tracks along with the video.</span>
+                    </div>
+                    <label class="switch small">
+                        <input type="checkbox" id="subtitlesToggle" onchange="saveDownloadSettings()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="settings-subgroup" id="subtitleOptions">
+                    <div class="control-row">
+                        <div class="settings-label">
+                            <span>Languages</span>
+                            <span class="settings-hint">Comma-separated codes, e.g. en,es. Use all for every
+                                track.</span>
+                        </div>
+                        <input type="text" id="subtitleLangs" class="settings-text" value="en"
+                            onchange="saveDownloadSettings()">
+                    </div>
+
+                    <div class="toggle-row">
+                        <div class="settings-label">
+                            <span>Include auto-generated</span>
+                            <span class="settings-hint">Machine transcripts, for videos with no written
+                                subtitles.</span>
+                        </div>
+                        <label class="switch small">
+                            <input type="checkbox" id="subtitlesAutoToggle" onchange="saveDownloadSettings()">
+                            <span class="slider round"></span>
+                        </label>
+                    </div>
+
+                    <div class="toggle-row">
+                        <div class="settings-label">
+                            <span>Embed into file</span>
+                            <span class="settings-hint">Off leaves them as separate subtitle files beside the
+                                video.</span>
+                        </div>
+                        <label class="switch small">
+                            <input type="checkbox" id="embedSubtitlesToggle" checked
+                                onchange="saveDownloadSettings()">
+                            <span class="slider round"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="settings-divider"></div>
+
+                <h3 class="settings-subheading">SponsorBlock</h3>
+
+                <div class="toggle-row">
+                    <div class="settings-label">
+                        <span>Remove marked segments</span>
+                        <span class="settings-hint">Cuts out sections the SponsorBlock community has flagged.</span>
+                    </div>
+                    <label class="switch small">
+                        <input type="checkbox" id="sponsorblockToggle" onchange="saveDownloadSettings()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="settings-subgroup" id="sponsorblockOptions">
+                    <div class="category-grid" id="sponsorblockCategories">
+                        <label class="category-chip">
+                            <input type="checkbox" value="sponsor" checked onchange="saveDownloadSettings()">
+                            <span>Sponsor</span>
+                        </label>
+                        <label class="category-chip">
+                            <input type="checkbox" value="selfpromo" checked onchange="saveDownloadSettings()">
+                            <span>Self-promo</span>
+                        </label>
+                        <label class="category-chip">
+                            <input type="checkbox" value="interaction" checked onchange="saveDownloadSettings()">
+                            <span>Interaction</span>
+                        </label>
+                        <label class="category-chip">
+                            <input type="checkbox" value="intro" onchange="saveDownloadSettings()">
+                            <span>Intro</span>
+                        </label>
+                        <label class="category-chip">
+                            <input type="checkbox" value="outro" onchange="saveDownloadSettings()">
+                            <span>Outro</span>
+                        </label>
+                        <label class="category-chip">
+                            <input type="checkbox" value="preview" onchange="saveDownloadSettings()">
+                            <span>Preview</span>
+                        </label>
+                        <label class="category-chip">
+                            <input type="checkbox" value="music_offtopic" onchange="saveDownloadSettings()">
+                            <span>Non-music</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="settings-divider"></div>
+
+                <h3 class="settings-subheading">Metadata</h3>
+
+                <div class="toggle-row">
+                    <div class="settings-label">
+                        <span>Embed thumbnail</span>
+                        <span class="settings-hint">Uses the video thumbnail as cover art.</span>
+                    </div>
+                    <label class="switch small">
+                        <input type="checkbox" id="embedThumbnailToggle" checked onchange="saveDownloadSettings()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="toggle-row">
+                    <div class="settings-label">
+                        <span>Embed metadata</span>
+                        <span class="settings-hint">Title, uploader and date, written into the file's tags.</span>
+                    </div>
+                    <label class="switch small">
+                        <input type="checkbox" id="embedMetadataToggle" checked onchange="saveDownloadSettings()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="toggle-row">
+                    <div class="settings-label">
+                        <span>Embed chapters</span>
+                        <span class="settings-hint">Chapter markers you can skip between during playback.</span>
+                    </div>
+                    <label class="switch small">
+                        <input type="checkbox" id="embedChaptersToggle" checked onchange="saveDownloadSettings()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="toggle-row">
+                    <div class="settings-label">
+                        <span>Split into per-chapter files</span>
+                        <span class="settings-hint">Also writes one file per chapter, next to the full
+                            download.</span>
+                    </div>
+                    <label class="switch small">
+                        <input type="checkbox" id="splitChaptersToggle" onchange="saveDownloadSettings()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
             </div>
 
             <div class="settings-footer">

@@ -751,15 +751,28 @@ function toggleSettings() {
         modal.classList.remove('hidden');
         // Load releases for the current tab
         fetchReleases(currentChannel);
+        loadDownloadSettings();
     } else {
         modal.classList.add('hidden');
     }
 }
 
+// Top-level Updates/Downloads sections. Kept separate from switchUpdateTab
+// because that one writes the channel preference to disk as a side effect.
+function switchSettingsSection(section) {
+    document.querySelectorAll('.settings-tab[data-section]').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.section === section);
+    });
+
+    document.getElementById('settingsSectionUpdates').classList.toggle('hidden', section !== 'updates');
+    document.getElementById('settingsSectionDownloads').classList.toggle('hidden', section !== 'downloads');
+}
+
 function switchUpdateTab(channel) {
     currentChannel = channel;
-    // Update tab active state
-    document.querySelectorAll('.settings-tab').forEach(tab => {
+    // Match on data-channel, not the bare .settings-tab class — the top-level
+    // section tabs share that class and would be deactivated here
+    document.querySelectorAll('.settings-tab[data-channel]').forEach(tab => {
         tab.classList.toggle('active', tab.dataset.channel === channel);
     });
 
@@ -1147,9 +1160,9 @@ async function loadUpdateSettings() {
         const autoToggle = document.getElementById('autoUpdateToggle');
         if (autoToggle) autoToggle.checked = settings.auto_check_updates !== false;
 
-        // Set the active channel tab
+        // Set the active channel tab (data-channel only — see switchUpdateTab)
         currentChannel = settings.update_channel || 'stable';
-        document.querySelectorAll('.settings-tab').forEach(tab => {
+        document.querySelectorAll('.settings-tab[data-channel]').forEach(tab => {
             tab.classList.toggle('active', tab.dataset.channel === currentChannel);
         });
 
@@ -1183,6 +1196,210 @@ async function saveUpdateSettings() {
         });
     } catch (e) {
         console.warn('Could not save update settings:', e);
+    }
+}
+
+// --- Download Settings ---
+
+// Every control in the Downloads panel starts on its markup default, which is
+// only a guess at what is stored. Saving before a load has landed would write
+// that guess over all seventeen real settings, so the save path waits.
+let downloadSettingsLoaded = false;
+// Monotonic id so an out-of-order save reply can't revert a newer change
+let downloadSettingsSaveSeq = 0;
+
+// A number input holds a string and can be left empty, so nothing reaches the
+// backend without being coerced first. Fallbacks match the /api/settings
+// defaults, which keeps a blank field from silently meaning zero.
+function clampInt(value, min, max, fallback) {
+    const parsed = parseInt(value, 10);
+    if (isNaN(parsed)) return fallback;
+    return Math.min(max, Math.max(min, parsed));
+}
+
+// Assigning a value a select has no option for blanks it instead, and that
+// blank would be posted straight back on the next save
+function setSelectValue(el, value, fallback) {
+    const wanted = String(value);
+    const known = Array.from(el.options).some(option => option.value === wanted);
+    el.value = known ? wanted : fallback;
+}
+
+function readSponsorblockCategories() {
+    const boxes = document.querySelectorAll('#sponsorblockCategories input[type="checkbox"]');
+    return Array.from(boxes).filter(box => box.checked).map(box => box.value);
+}
+
+// Controls that only mean something when their parent option is on stay visible
+// but inert, so the panel still shows what turning it on would give you
+function setSubgroupEnabled(id, enabled) {
+    const group = document.getElementById(id);
+    group.classList.toggle('disabled', !enabled);
+    // The class only greys it out — disabling the controls is what actually
+    // keeps them out of reach of the mouse and the tab key
+    group.querySelectorAll('input, select').forEach(control => {
+        control.disabled = !enabled;
+    });
+}
+
+function updateMediaDependencies() {
+    setSubgroupEnabled('subtitleOptions', document.getElementById('subtitlesToggle').checked);
+    setSubgroupEnabled('sponsorblockOptions', document.getElementById('sponsorblockToggle').checked);
+
+    // flac and wav are lossless, so yt-dlp's quality setting has nothing to act on
+    const audioFormat = document.getElementById('audioFormatSelect').value;
+    const lossless = audioFormat === 'flac' || audioFormat === 'wav';
+    document.getElementById('audioQualitySelect').disabled = lossless;
+    document.getElementById('audioQualityHint').textContent = lossless
+        ? `Not used — ${audioFormat} keeps every bit of the source.`
+        : 'Lower quality means a smaller file.';
+}
+
+function applyDownloadSettings(settings) {
+    if (!settings) return;
+
+    document.getElementById('concurrentFragments').value = clampInt(settings.concurrent_fragments, 1, 16, 4);
+    // No upper bound in the contract — the backend is the authority on clamping
+    document.getElementById('rateLimitKbps').value = clampInt(settings.rate_limit_kbps, 0, Infinity, 0);
+    document.getElementById('downloadArchiveToggle').checked = settings.use_download_archive !== false;
+    document.getElementById('preciseTrimToggle').checked = settings.precise_trim === true;
+
+    setSelectValue(document.getElementById('containerSelect'), settings.container, 'mp4');
+    setSelectValue(document.getElementById('audioFormatSelect'), settings.audio_format, 'mp3');
+    setSelectValue(document.getElementById('audioQualitySelect'), settings.audio_quality, '0');
+
+    document.getElementById('subtitlesToggle').checked = settings.subtitles_enabled === true;
+    if (typeof settings.subtitle_langs === 'string') {
+        document.getElementById('subtitleLangs').value = settings.subtitle_langs;
+    }
+    document.getElementById('subtitlesAutoToggle').checked = settings.subtitles_auto === true;
+    document.getElementById('embedSubtitlesToggle').checked = settings.embed_subtitles !== false;
+
+    document.getElementById('sponsorblockToggle').checked = settings.sponsorblock_enabled === true;
+    // Only touched when a list actually arrived — a missing key read as "none
+    // selected" would clear every box and then save that emptiness back
+    if (Array.isArray(settings.sponsorblock_categories)) {
+        document.querySelectorAll('#sponsorblockCategories input[type="checkbox"]').forEach(box => {
+            box.checked = settings.sponsorblock_categories.includes(box.value);
+        });
+    }
+
+    document.getElementById('embedThumbnailToggle').checked = settings.embed_thumbnail !== false;
+    document.getElementById('embedMetadataToggle').checked = settings.embed_metadata !== false;
+    document.getElementById('embedChaptersToggle').checked = settings.embed_chapters !== false;
+    document.getElementById('splitChaptersToggle').checked = settings.split_chapters === true;
+
+    updateMediaDependencies();
+}
+
+async function loadDownloadSettings() {
+    const statusEl = document.getElementById('downloadSettingsStatus');
+
+    // A load that failed must not leave the markup defaults on screen looking
+    // like saved preferences — say so instead.
+    const showLoadFailure = (message) => {
+        if (!statusEl) return;
+        statusEl.textContent = message;
+        statusEl.className = 'update-check-status error';
+    };
+
+    try {
+        const response = await fetch('/api/settings');
+        if (!response.ok) {
+            showLoadFailure(`Couldn't load saved settings (HTTP ${response.status}) — changes won't be saved.`);
+            return null;
+        }
+
+        const settings = await response.json();
+        applyDownloadSettings(settings);
+        if (settings) downloadSettingsLoaded = true;
+        if (statusEl) statusEl.className = 'update-check-status hidden';
+        return settings;
+    } catch (e) {
+        console.warn('Could not load download settings:', e);
+        showLoadFailure(`Couldn't load saved settings: ${e.message} — changes won't be saved.`);
+        return null;
+    } finally {
+        // A failed load applies nothing, but the panel is on screen regardless
+        // and its dependent controls still have to match the toggles above them
+        updateMediaDependencies();
+    }
+}
+
+async function saveDownloadSettings() {
+    if (!downloadSettingsLoaded) {
+        console.warn('Download settings have not loaded yet — not saving.');
+        return;
+    }
+
+    // Follow the toggle straight away rather than waiting for the round trip,
+    // so the dependent controls never look live while they are being saved off
+    updateMediaDependencies();
+
+    const langs = document.getElementById('subtitleLangs').value.trim();
+
+    // Only the keys this page renders — the whole contract as of now, but the
+    // body stays partial on purpose so a key added to the backend later isn't
+    // overwritten with a stale value from a control that doesn't exist yet
+    const payload = {
+        concurrent_fragments: clampInt(document.getElementById('concurrentFragments').value, 1, 16, 4),
+        rate_limit_kbps: clampInt(document.getElementById('rateLimitKbps').value, 0, Infinity, 0),
+        use_download_archive: document.getElementById('downloadArchiveToggle').checked,
+        precise_trim: document.getElementById('preciseTrimToggle').checked,
+        container: document.getElementById('containerSelect').value,
+        audio_format: document.getElementById('audioFormatSelect').value,
+        audio_quality: document.getElementById('audioQualitySelect').value,
+        subtitles_enabled: document.getElementById('subtitlesToggle').checked,
+        // An empty box would ask for no languages at all, which is never what
+        // clearing the field is meant to mean
+        subtitle_langs: langs || 'en',
+        subtitles_auto: document.getElementById('subtitlesAutoToggle').checked,
+        embed_subtitles: document.getElementById('embedSubtitlesToggle').checked,
+        sponsorblock_enabled: document.getElementById('sponsorblockToggle').checked,
+        sponsorblock_categories: readSponsorblockCategories(),
+        embed_thumbnail: document.getElementById('embedThumbnailToggle').checked,
+        embed_metadata: document.getElementById('embedMetadataToggle').checked,
+        embed_chapters: document.getElementById('embedChaptersToggle').checked,
+        split_chapters: document.getElementById('splitChaptersToggle').checked
+    };
+
+    // Flipping two toggles quickly starts two saves; the replies can land out
+    // of order, and each one re-applies a full settings object. Without this,
+    // a stale reply would visibly revert the newer change.
+    const seq = ++downloadSettingsSaveSeq;
+
+    const statusEl = document.getElementById('downloadSettingsStatus');
+    try {
+        const response = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+
+        if (seq !== downloadSettingsSaveSeq) return; // a newer save won
+
+        if (!response.ok || !data || !data.success) {
+            const reason = (data && data.error) || `HTTP ${response.status}`;
+            if (statusEl) {
+                statusEl.textContent = `Couldn't save settings: ${reason}`;
+                statusEl.className = 'update-check-status error';
+            }
+            return;
+        }
+
+        // Show what was actually stored, so backend clamping is visible instead
+        // of the field keeping a value that was never saved
+        if (data.settings) {
+            applyDownloadSettings(data.settings);
+        }
+        if (statusEl) statusEl.className = 'update-check-status hidden';
+    } catch (e) {
+        console.warn('Could not save download settings:', e);
+        if (seq === downloadSettingsSaveSeq && statusEl) {
+            statusEl.textContent = `Couldn't save settings: ${e.message}`;
+            statusEl.className = 'update-check-status error';
+        }
     }
 }
 
