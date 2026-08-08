@@ -20,6 +20,7 @@ import yt_dlp
 from flask import Flask, request, jsonify, send_from_directory, Response
 from urllib.request import urlopen, Request
 from urllib.error import URLError
+from urllib.parse import urlparse
 
 
 class FFmpegManager:
@@ -46,7 +47,10 @@ class FFmpegManager:
     
     def get_ffmpeg_dir(self):
         """Get the directory containing ffmpeg binaries."""
-        if self._custom_path and os.path.exists(self._custom_path):
+        # Only honour the custom path while it still holds an ffmpeg binary —
+        # a stale folder would otherwise shadow a fresh AppData install.
+        ffmpeg_name = 'ffmpeg.exe' if os.name == 'nt' else 'ffmpeg'
+        if self._custom_path and os.path.exists(os.path.join(self._custom_path, ffmpeg_name)):
             return self._custom_path
         return os.path.join(self.get_app_data_dir(), 'ffmpeg')
     
@@ -85,11 +89,22 @@ class FFmpegManager:
             pass
     
     def _save_config(self):
-        """Save configuration to disk."""
+        """Save configuration to disk.
+
+        Merges into the existing file — update settings live in the same
+        config.json and must not be wiped by an ffmpeg path change.
+        """
         try:
-            config = {'ffmpeg_path': self._custom_path}
+            existing = {}
+            if os.path.exists(self._config_file):
+                try:
+                    with open(self._config_file, 'r') as f:
+                        existing = json.load(f)
+                except Exception:
+                    existing = {}
+            existing['ffmpeg_path'] = self._custom_path
             with open(self._config_file, 'w') as f:
-                json.dump(config, f)
+                json.dump(existing, f)
         except Exception:
             pass
     
@@ -227,15 +242,27 @@ class UpdateManager:
             pass
         return {}
 
+    # Config keys this manager owns — everything else in config.json belongs
+    # to another component and must be left exactly as found on disk.
+    CONFIG_KEYS = ('update_channel', 'auto_check_updates',
+                   'skipped_version', 'last_update_check')
+
     def _save_config(self):
         """Save update-related config back to the shared config file."""
         try:
             # Merge with existing config (don't overwrite ffmpeg_path etc.)
             existing = {}
             if os.path.exists(self._config_file):
-                with open(self._config_file, 'r') as f:
-                    existing = json.load(f)
-            existing.update(self._config)
+                try:
+                    with open(self._config_file, 'r') as f:
+                        existing = json.load(f)
+                except Exception:
+                    existing = {}
+            # Only write back our own keys — self._config is a startup snapshot
+            # of the whole file and would otherwise restore stale values.
+            for key in self.CONFIG_KEYS:
+                if key in self._config:
+                    existing[key] = self._config[key]
             with open(self._config_file, 'w') as f:
                 json.dump(existing, f)
         except Exception:
@@ -286,8 +313,9 @@ class UpdateManager:
         """Check if remote_version is newer than local_version."""
         remote = self._parse_version(remote_version)
         local = self._parse_version(local_version)
-        # Compare (major, minor, patch) only — don't penalize pre-release
-        return remote[:3] > local[:3]
+        # Compare (major, minor, patch, is_stable) so the stable release wins
+        # over a pre-release of the same version — 1.2.2 updates 1.2.2b-foo.
+        return remote[:4] > local[:4]
 
     def _should_auto_check(self):
         """Check if enough time has passed since the last automatic check."""
@@ -331,7 +359,9 @@ class UpdateManager:
             
         Returns dict with update info or None if up-to-date/error.
         """
-        # Respect cooldown unless forced
+        # Respect the user's preference and the cooldown unless forced
+        if not force and not self._config.get('auto_check_updates', True):
+            return {'skipped': True, 'reason': 'disabled'}
         if not force and not self._should_auto_check():
             return {'skipped': True, 'reason': 'cooldown'}
 
@@ -414,7 +444,8 @@ class UpdateManager:
         try:
             download_dir = os.path.join(FFmpegManager.get_app_data_dir(), 'updates')
             os.makedirs(download_dir, exist_ok=True)
-            dest_path = os.path.join(download_dir, asset_name)
+            # Never let the asset name steer the write outside the updates dir
+            dest_path = os.path.join(download_dir, os.path.basename(asset_name))
 
             req = Request(asset_url, headers={'User-Agent': 'FinFetcher-Updater/1.0'})
 
@@ -462,29 +493,34 @@ class UpdateManager:
 
     def apply_update(self, downloaded_exe_path):
         """Launch an updater script and exit the app.
-        
-        When frozen (PyInstaller --onefile), sys.executable is the exe itself
-        and cannot be used as a Python interpreter. Instead we generate a
-        Windows batch script that waits for this process to exit, swaps the
-        exe, cleans up, and relaunches. This runs completely outside the _MEI
-        temp directory so PyInstaller can clean it up.
-        
-        When running from source, we use the Python-based helper directly.
-        
+
+        Only supported for the packaged exe. When frozen (PyInstaller
+        --onefile), sys.executable is the exe itself and cannot be used as a
+        Python interpreter, so we generate a Windows batch script that waits
+        for this process to exit, swaps the exe, cleans up, and relaunches.
+        This runs completely outside the _MEI temp directory so PyInstaller
+        can clean it up.
+
+        Running from source there is nothing to swap — the "old exe" would be
+        main.pyw itself — so callers must refuse before getting here.
+
         Returns True if the updater was launched successfully.
         """
+        if not getattr(sys, 'frozen', False):
+            return False
+
         try:
             pid = os.getpid()
+            current_exe = sys.executable
+            # Generate a batch script in AppData (outside _MEI)
+            bat_path = os.path.join(FFmpegManager.get_app_data_dir(), 'update.bat')
+            updates_dir = os.path.join(FFmpegManager.get_app_data_dir(), 'updates')
+            log_path = os.path.join(FFmpegManager.get_app_data_dir(), 'update.log')
 
-            if getattr(sys, 'frozen', False):
-                current_exe = sys.executable
-                exe_dir = os.path.dirname(current_exe)
-                # Generate a batch script in AppData (outside _MEI)
-                bat_path = os.path.join(FFmpegManager.get_app_data_dir(), 'update.bat')
-                updates_dir = os.path.join(FFmpegManager.get_app_data_dir(), 'updates')
-                log_path = os.path.join(FFmpegManager.get_app_data_dir(), 'update.log')
-
-                bat_content = f'''@echo off
+            # chcp 65001 + a UTF-8 file keeps non-ASCII paths (e.g. C:\Users\José)
+            # intact — cmd.exe otherwise reads the script in the OEM codepage.
+            bat_content = f'''@echo off
+chcp 65001 >NUL
 setlocal
 
 set LOGFILE="{log_path}"
@@ -502,61 +538,52 @@ echo [%DATE% %TIME%] App exited >> %LOGFILE%
 REM Grace period for file handles to release
 timeout /t 2 /nobreak >NUL
 
+REM Bail out before touching anything if the update went missing
+if not exist "{downloaded_exe_path}" (
+    echo [%DATE% %TIME%] Update file missing - aborting >> %LOGFILE%
+    goto relaunch
+)
+
 REM Replace the old exe
 if exist "{current_exe}.bak" del /f "{current_exe}.bak"
 if exist "{current_exe}" move /y "{current_exe}" "{current_exe}.bak"
 move /y "{downloaded_exe_path}" "{current_exe}"
+if errorlevel 1 goto swap_failed
 echo [%DATE% %TIME%] Exe swapped >> %LOGFILE%
 
-REM Clean up backup
+REM Clean up backup and the downloaded update
 del /f "{current_exe}.bak" 2>NUL
-
-REM Clean up updates download dir
 if exist "{updates_dir}" rmdir /s /q "{updates_dir}" 2>NUL
+goto relaunch
 
+:swap_failed
+REM Swap failed — put the old exe back so the app still starts
+echo [%DATE% %TIME%] Swap FAILED - restoring backup >> %LOGFILE%
+if exist "{current_exe}.bak" move /y "{current_exe}.bak" "{current_exe}"
+
+:relaunch
 REM Brief pause before relaunch
 timeout /t 1 /nobreak >NUL
 
-REM Relaunch the updated app (use explorer to simulate double-click)
+REM Relaunch the app (use explorer to simulate double-click)
 echo [%DATE% %TIME%] Launching >> %LOGFILE%
 explorer.exe "{current_exe}"
 
 REM Self-delete this batch script
 del /f "%~f0" 2>NUL
 '''
-                with open(bat_path, 'w') as f:
-                    f.write(bat_content)
+            with open(bat_path, 'w', encoding='utf-8') as f:
+                f.write(bat_content)
 
-                # Launch the batch script hidden (no console window)
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = 0  # SW_HIDE
-                subprocess.Popen(
-                    ['cmd.exe', '/c', bat_path],
-                    startupinfo=startupinfo,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            else:
-                # Running from source — use the Python-based helper
-                current_exe = os.path.abspath(__file__)
-                helper_script = os.path.join(os.path.dirname(current_exe), 'updater_helper.py')
-                python_exe = _get_python_exe()
-
-                startupinfo = None
-                creationflags = 0
-                if os.name == 'nt':
-                    startupinfo = subprocess.STARTUPINFO()
-                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    creationflags = subprocess.CREATE_NO_WINDOW
-
-                subprocess.Popen(
-                    [python_exe, helper_script,
-                     '--pid', str(pid),
-                     '--old', current_exe,
-                     '--new', downloaded_exe_path],
-                    startupinfo=startupinfo,
-                    creationflags=creationflags,
-                )
+            # Launch the batch script hidden (no console window)
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
+            subprocess.Popen(
+                ['cmd.exe', '/c', bat_path],
+                startupinfo=startupinfo,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
 
             return True
 
@@ -741,6 +768,11 @@ def update_check():
     return jsonify(result or {'available': False})
 
 
+# Hosts an update may be downloaded from. Anything else is refused so a
+# rogue page in the webview can't use this endpoint to fetch arbitrary files.
+ALLOWED_UPDATE_HOSTS = ('github.com', 'objects.githubusercontent.com', 'nightly.link')
+
+
 @app.route('/api/update/download', methods=['GET'])
 def update_download():
     """Download an update with SSE progress streaming."""
@@ -749,6 +781,15 @@ def update_download():
 
     if not asset_url or not asset_name:
         return jsonify({'error': 'Missing url or name parameters'}), 400
+
+    parsed_url = urlparse(asset_url)
+    if parsed_url.scheme != 'https' or parsed_url.hostname not in ALLOWED_UPDATE_HOSTS:
+        return jsonify({'error': 'Untrusted update host'}), 400
+
+    # Strip any directory component — the file belongs in the updates dir
+    asset_name = os.path.basename(asset_name)
+    if not asset_name or asset_name in ('.', '..'):
+        return jsonify({'error': 'Invalid asset name'}), 400
 
     def generate():
         try:
@@ -794,8 +835,25 @@ def update_apply():
     data = request.json
     downloaded_path = data.get('path')
 
+    if not getattr(sys, 'frozen', False):
+        return jsonify({
+            'success': False,
+            'error': 'Self-update is only available in the packaged exe — '
+                     'please download the new version manually.',
+        })
+
     if not downloaded_path or not os.path.exists(downloaded_path):
         return jsonify({'success': False, 'error': 'Downloaded file not found'})
+
+    # Only ever swap in something we downloaded ourselves
+    updates_dir = os.path.realpath(os.path.join(FFmpegManager.get_app_data_dir(), 'updates'))
+    try:
+        in_updates_dir = os.path.commonpath(
+            [os.path.realpath(downloaded_path), updates_dir]) == updates_dir
+    except ValueError:  # different drives
+        in_updates_dir = False
+    if not in_updates_dir:
+        return jsonify({'success': False, 'error': 'Update file is outside the updates folder'})
 
     success = update_manager.apply_update(downloaded_path)
 
@@ -816,6 +874,9 @@ def update_settings():
     if request.method == 'GET':
         settings = update_manager.get_settings()
         settings['current_version'] = update_manager.get_current_version()
+        # Self-update only works for the packaged exe — the UI hides the
+        # install buttons when running from source.
+        settings['can_self_update'] = bool(getattr(sys, 'frozen', False))
         return jsonify(settings)
     else:
         data = request.json
@@ -926,13 +987,29 @@ def update_artifacts():
 
             # Construct nightly.link download URL
             # Format: https://nightly.link/owner/repo/actions/runs/{run_id}/{artifact_name}.zip
-            # The artifact name from build-test.yml is FinFetcher_{branch_suffix}
+            # The artifact name from build-test.yml is normally FinFetcher_{branch_suffix},
+            # but a workflow_dispatch run names it after the build_name input —
+            # so ask GitHub for the real name and only guess if that fails.
             branch_suffix = branch
             for prefix in ('feature/', 'bugfix/'):
                 if branch_suffix.startswith(prefix):
                     branch_suffix = branch_suffix[len(prefix):]
                     break
             artifact_name = f'FinFetcher_{branch_suffix}'
+            try:
+                art_req = Request(
+                    f'https://api.github.com/repos/mkiera/FinFetcher/actions/runs/{run_id}/artifacts',
+                    headers={
+                        'User-Agent': 'FinFetcher-Updater/1.0',
+                        'Accept': 'application/vnd.github.v3+json',
+                    })
+                with urlopen(art_req, timeout=5) as art_resp:
+                    artifacts = json.loads(art_resp.read().decode('utf-8')).get('artifacts', [])
+                artifacts = [a for a in artifacts if not a.get('expired')]
+                if artifacts:
+                    artifact_name = artifacts[0].get('name', artifact_name)
+            except Exception:
+                pass
             download_url = f'https://nightly.link/mkiera/FinFetcher/actions/runs/{run_id}/{artifact_name}.zip'
 
             # Fetch version.txt from this commit
@@ -1004,7 +1081,7 @@ try:
         'no_warnings': True,
     }}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.cookiejar.save('{cookies_file.replace(chr(92), chr(92)*2)}', ignore_discard=True, ignore_expires=True)
+        ydl.cookiejar.save({cookies_file!r}, ignore_discard=True, ignore_expires=True)
     print('OK')
 except Exception as e:
     print(f'FAIL:{{e}}', file=sys.stderr)
@@ -1171,20 +1248,39 @@ def estimate_size(formats, quality='max'):
     best_audio = None
     
     for f in formats:
-        if f.get('vcodec') and f.get('vcodec') != 'none':
+        # yt-dlp uses the string 'none' (not None) for a missing stream
+        has_video = f.get('vcodec') not in (None, 'none')
+        has_audio = f.get('acodec') not in (None, 'none')
+        if has_video:
             if not best_video or (f.get('height', 0) or 0) > (best_video.get('height', 0) or 0):
                 best_video = f
-        if f.get('acodec') and f.get('acodec') != 'none' and not f.get('vcodec'):
+        if has_audio and not has_video:
             if not best_audio or (f.get('abr', 0) or 0) > (best_audio.get('abr', 0) or 0):
                 best_audio = f
-    
+
     total = 0
-    if best_video and best_video.get('filesize'):
-        total += best_video['filesize']
-    if best_audio and best_audio.get('filesize'):
-        total += best_audio['filesize']
+    if best_video:
+        total += best_video.get('filesize') or best_video.get('filesize_approx') or 0
+    if best_audio:
+        total += best_audio.get('filesize') or best_audio.get('filesize_approx') or 0
     
     return total if total > 0 else None
+
+
+def parse_timestamp(value):
+    """Parse 'SS', 'MM:SS' or 'HH:MM:SS' into seconds. None if unparseable."""
+    if not value:
+        return None
+    try:
+        parts = [int(p) for p in str(value).strip().split(':')]
+    except ValueError:
+        return None
+    if not 1 <= len(parts) <= 3 or any(p < 0 for p in parts):
+        return None
+    seconds = 0
+    for part in parts:
+        seconds = seconds * 60 + part
+    return seconds
 
 
 def format_size(bytes_size):
@@ -1436,8 +1532,9 @@ def download():
     if not os.path.exists(save_path):
         os.makedirs(save_path)
 
-    # Output template
-    output_template = '%(title)s.%(ext)s' if mode == 'video' else '%(artist)s - %(title)s.%(ext)s'
+    # Output template — the artist prefix (and its separator) is dropped
+    # entirely when the video has no artist metadata, instead of "NA - ".
+    output_template = '%(title)s.%(ext)s' if mode == 'video' else '%(artist&{} - |)s%(title)s.%(ext)s'
     
     # Configure yt-dlp options
     ffmpeg_dir = get_ffmpeg_dir()
@@ -1588,7 +1685,18 @@ def download():
                 pass
             
             # Post-download trimming (if requested)
-            if download_success and trim_start and trim_end and final_file:
+            can_trim = bool(trim_start and trim_end and download_success and final_file)
+            start_sec, end_sec = parse_timestamp(trim_start), parse_timestamp(trim_end)
+            trim_range_ok = (start_sec is not None and end_sec is not None
+                             and end_sec > start_sec)
+
+            if can_trim and download_type != 'single':
+                # A playlist has no single file to trim — the stale checkbox
+                # would otherwise re-encode whichever entry finished last.
+                yield f"data: {json.dumps({'log': '> [FinFetcher] Trimming is not supported for playlists — skipping.'})}\n\n"
+            elif can_trim and not trim_range_ok:
+                yield f"data: {json.dumps({'log': f'> [FinFetcher] Invalid trim range ({trim_start} to {trim_end}) — keeping the full download.'})}\n\n"
+            elif can_trim:
                 try:
                     yield f"data: {json.dumps({'log': f'> [FinFetcher] Trimming video from {trim_start} to {trim_end}...'})}\n\n"
                     
@@ -1663,7 +1771,15 @@ def download():
                         
                     trim_proc.wait()
                     
-                    if trim_proc.returncode == 0:
+                    # Only replace the original if ffmpeg actually produced something —
+                    # an empty output would otherwise destroy the download.
+                    trimmed_ok = (
+                        trim_proc.returncode == 0
+                        and os.path.exists(trimmed_file)
+                        and os.path.getsize(trimmed_file) > 0
+                    )
+
+                    if trimmed_ok:
                         yield f"data: {json.dumps({'log': '> [FinFetcher] Trim successful! Replacing original file...'})}\n\n"
                         try:
                             if os.path.exists(final_file):
@@ -1673,8 +1789,14 @@ def download():
                         except Exception as e:
                             yield f"data: {json.dumps({'log': f'> [FinFetcher] Error replacing file: {e}'})}\n\n"
                     else:
-                        yield f"data: {json.dumps({'log': f'> [FinFetcher] Trim failed with code {trim_proc.returncode}'})}\n\n"
-                         
+                        # Leave the original download untouched and clean up the scrap
+                        try:
+                            if os.path.exists(trimmed_file):
+                                os.remove(trimmed_file)
+                        except Exception:
+                            pass
+                        yield f"data: {json.dumps({'log': f'> [FinFetcher] Trim failed with code {trim_proc.returncode} — keeping the untrimmed download.'})}\n\n"
+
                 except Exception as e:
                     yield f"data: {json.dumps({'log': f'> [FinFetcher] Trim error: {e}'})}\n\n"
             

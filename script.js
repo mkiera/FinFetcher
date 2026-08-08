@@ -8,9 +8,53 @@ let currentMode = 'video';
 let currentUrl = '';
 let videoDuration = 0;
 let cachedVideoInfo = null;
+let cachedInfoUrl = null;
+let canSelfUpdate = true;
 
 // Initialize - check for ffmpeg first
 checkSetup();
+
+/**
+ * Read a Server-Sent-Event stream, buffering across reads.
+ * A network chunk can split an event in half, so events are only parsed once a
+ * complete "\n\n" terminated block has arrived — otherwise a status or error
+ * event landing on a chunk boundary is silently lost.
+ * Return false from onEvent to stop reading early.
+ */
+async function readEventStream(response, onEvent) {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+        while (true) {
+            const { value, done } = await reader.read();
+            buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+
+            const events = buffer.split('\n\n');
+            // The last piece is an incomplete event — keep it for the next read
+            buffer = done ? '' : events.pop();
+
+            for (const event of events) {
+                const line = event.trim();
+                if (!line.startsWith('data: ')) continue;
+
+                let data;
+                try {
+                    data = JSON.parse(line.substring(6));
+                } catch (e) {
+                    continue; // malformed event - skip it, keep reading
+                }
+
+                if (onEvent(data) === false) return;
+            }
+
+            if (done) return;
+        }
+    } finally {
+        try { reader.cancel(); } catch (e) { /* stream already closed */ }
+    }
+}
 
 async function checkSetup() {
     try {
@@ -36,15 +80,19 @@ function showSetupScreen() {
     document.getElementById('mainContainer').classList.add('hidden');
 }
 
-function showMainApp() {
+async function showMainApp() {
     document.getElementById('setupScreen').classList.add('hidden');
     document.getElementById('mainContainer').classList.remove('hidden');
 
     // Initialize main app
     selectMode(currentMode);
     loadVersion();
-    loadUpdateSettings();
-    checkForUpdates();
+
+    // Only check for updates if the user hasn't turned that off
+    const settings = await loadUpdateSettings();
+    if (!settings || settings.auto_check_updates !== false) {
+        checkForUpdates();
+    }
 }
 
 async function installFFmpeg() {
@@ -59,55 +107,46 @@ async function installFFmpeg() {
     progress.classList.remove('hidden');
     if (note) note.classList.add('hidden');
 
-    try {
-        const response = await fetch('/api/setup/install-sync', { method: 'POST' });
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n\n');
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    try {
-                        const data = JSON.parse(line.substring(6));
-
-                        // Update progress bar
-                        progressFill.style.width = data.percent + '%';
-                        status.textContent = data.status;
-
-                        // Check for completion
-                        if (data.success === true) {
-                            setTimeout(() => {
-                                showMainApp();
-                            }, 1000);
-                            return;
-                        } else if (data.success === false) {
-                            // Installation failed
-                            status.textContent = 'Installation failed. Please try again or browse manually.';
-                            status.style.color = '#ff6b6b';
-                            buttons.classList.remove('hidden');
-                            progress.classList.add('hidden');
-                            if (note) note.classList.remove('hidden');
-                            return;
-                        }
-                    } catch (e) {
-                        // Ignore JSON parse errors
-                    }
-                }
-            }
-        }
-    } catch (e) {
-        console.error('Install error:', e);
-        status.textContent = 'Error: ' + e.message;
+    // Put the setup screen back so the user can retry or browse manually
+    const showFailure = (message) => {
+        status.textContent = message;
         status.style.color = '#ff6b6b';
         buttons.classList.remove('hidden');
         progress.classList.add('hidden');
         if (note) note.classList.remove('hidden');
+    };
+
+    try {
+        const response = await fetch('/api/setup/install-sync', { method: 'POST' });
+
+        let settled = false;
+
+        await readEventStream(response, (data) => {
+            // Update progress bar
+            progressFill.style.width = data.percent + '%';
+            status.textContent = data.status;
+
+            // Check for completion
+            if (data.success === true) {
+                settled = true;
+                setTimeout(() => {
+                    showMainApp();
+                }, 1000);
+                return false;
+            } else if (data.success === false) {
+                settled = true;
+                showFailure('Installation failed. Please try again or browse manually.');
+                return false;
+            }
+        });
+
+        // Stream ended without telling us either way — don't strand the user
+        if (!settled) {
+            showFailure('Installation ended unexpectedly. Please try again or browse manually.');
+        }
+    } catch (e) {
+        console.error('Install error:', e);
+        showFailure('Error: ' + e.message);
     }
 }
 
@@ -158,7 +197,11 @@ document.getElementById('urlInput').addEventListener('blur', async (e) => {
     const url = e.target.value.trim();
     if (url && url !== currentUrl) {
         currentUrl = url;
-        cachedVideoInfo = await fetchVideoInfo(url);
+        const info = await fetchVideoInfo(url);
+        // Only mark the cache valid for the URL that actually produced it —
+        // clicking Download blurs the input, so this fetch is still in flight
+        cachedVideoInfo = info;
+        cachedInfoUrl = info ? url : null;
     }
 });
 
@@ -261,7 +304,7 @@ async function fetchVideoInfo(url, preserveState = false) {
         console.error(e);
         recordError(e.message);
         document.getElementById('urlStatus').textContent = "❌ Your seal couldn't find that";
-        document.querySelector('#logContainer').innerHTML += `<div class='log-entry'>> Your seal couldn't find that: ${e.message}</div>`;
+        log(`Your seal couldn't find that: ${e.message}`);
         document.getElementById('previewPanel').classList.add('hidden');
         return null;
     }
@@ -298,19 +341,36 @@ function populatePreviewPanel(data) {
         // Disable Quality and Trim for playlists
         singleVideoOptions.classList.add('disabled-for-playlist');
 
+        // The greyed-out styling doesn't clear the control, so a trim left over
+        // from a previous single video would still be submitted with the playlist
+        const playlistTrimToggle = document.getElementById('trimToggle');
+        playlistTrimToggle.checked = false;
+        toggleTrimInputs();
+
         // Populate playlist entries
         const entriesContainer = document.getElementById('playlistEntries');
         entriesContainer.innerHTML = '';
 
+        // Built with textContent, never innerHTML — entry titles come from the
+        // remote site and would otherwise execute as HTML in this window.
         data.entries.forEach((entry, index) => {
             const entryEl = document.createElement('div');
             entryEl.className = 'playlist-entry';
-            entryEl.innerHTML = `
-                <div class="playlist-entry-header">
-                    <span class="playlist-entry-title">${index + 1}. ${entry.title}</span>
-                    <span class="playlist-entry-duration">${formatTime(entry.duration || 0)}</span>
-                </div>
-            `;
+
+            const header = document.createElement('div');
+            header.className = 'playlist-entry-header';
+
+            const entryTitle = document.createElement('span');
+            entryTitle.className = 'playlist-entry-title';
+            entryTitle.textContent = `${index + 1}. ${entry.title}`;
+
+            const entryDuration = document.createElement('span');
+            entryDuration.className = 'playlist-entry-duration';
+            entryDuration.textContent = formatTime(entry.duration || 0);
+
+            header.appendChild(entryTitle);
+            header.appendChild(entryDuration);
+            entryEl.appendChild(header);
             entriesContainer.appendChild(entryEl);
         });
     } else {
@@ -348,12 +408,13 @@ async function initiateDownload() {
     document.getElementById('downloadBtn').disabled = true;
     document.getElementById('downloadBtn').textContent = "Starting...";
 
-    // Use cached info if URL hasn't changed
+    // Use cached info only if it was fetched for this exact URL
+    currentUrl = url;
     let data = cachedVideoInfo;
-    if (url !== currentUrl || !cachedVideoInfo) {
-        currentUrl = url;
+    if (url !== cachedInfoUrl || !cachedVideoInfo) {
         data = await fetchVideoInfo(url, true);
         cachedVideoInfo = data;
+        cachedInfoUrl = data ? url : null;
     }
 
     if (data) {
@@ -377,6 +438,26 @@ function confirmDownload(type) {
 function initializeSlider() {
     const rangeStart = document.getElementById('rangeStart');
     const rangeEnd = document.getElementById('rangeEnd');
+    const trimToggle = document.getElementById('trimToggle');
+
+    // No usable duration (playlist, live stream, some direct links) means the
+    // slider can only ever produce 00:00 → 00:00, so don't offer trimming
+    if (!videoDuration || videoDuration <= 0) {
+        // Collapse the range too, so a leftover max from the previous video
+        // can't clamp anything the user types into the time boxes
+        rangeStart.max = 0;
+        rangeEnd.max = 0;
+        rangeStart.value = 0;
+        rangeEnd.value = 0;
+        trimToggle.checked = false;
+        trimToggle.disabled = true;
+        trimToggle.title = 'Trimming needs a video with a known duration';
+        toggleTrimInputs();
+        return;
+    }
+
+    trimToggle.disabled = false;
+    trimToggle.title = '';
 
     rangeStart.max = videoDuration;
     rangeEnd.max = videoDuration;
@@ -403,6 +484,11 @@ function updateSlider(handle) {
 
     const min = parseInt(rangeStart.min);
     const max = parseInt(rangeStart.max);
+
+    // Degenerate range (unknown duration) — writing back would clobber whatever
+    // the user typed with 00:00 and the fill percentage would be NaN
+    if (!(max > min)) return;
+
     const currentStart = parseInt(rangeStart.value);
     const currentEnd = parseInt(rangeEnd.value);
 
@@ -475,7 +561,8 @@ async function startDownload(type) {
     // Collect options before folder dialog (pywebview can cause UI state issues)
     const logToFile = document.getElementById('logToggle').checked;
     const quality = document.getElementById('qualitySelect').value;
-    const trim = document.getElementById('trimToggle').checked;
+    // Trimming applies to a single file only — never send it with a playlist
+    const trim = type !== 'playlist' && document.getElementById('trimToggle').checked;
     let trimStart = null;
     let trimEnd = null;
 
@@ -484,6 +571,14 @@ async function startDownload(type) {
         trimEnd = document.getElementById('trimEnd').value.trim();
         if (!trimStart || !trimEnd) {
             alert("Please enter start and end times for trimming (e.g. 00:30, 01:45)");
+            resetUI();
+            return;
+        }
+
+        const startSec = parseTime(trimStart);
+        const endSec = parseTime(trimEnd);
+        if (startSec === null || endSec === null || endSec <= startSec) {
+            alert("Please enter a valid trim range — the end time must be after the start time.");
             resetUI();
             return;
         }
@@ -508,56 +603,45 @@ async function startDownload(type) {
     }
 
     // Start download request
-    fetch('/api/download', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            url: currentUrl,
-            mode: currentMode,
-            type: type,
-            save_path: savePath,
-            log_to_file: logToFile,
-            quality: quality,
-            trim_start: trimStart,
-            trim_end: trimEnd
-        })
-    }).then(async response => {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
+    try {
+        const response = await fetch('/api/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                url: currentUrl,
+                mode: currentMode,
+                type: type,
+                save_path: savePath,
+                log_to_file: logToFile,
+                quality: quality,
+                trim_start: trimStart,
+                trim_end: trimEnd
+            })
+        });
 
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n\n');
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const jsonStr = line.substring(6);
-                    try {
-                        const msg = JSON.parse(jsonStr);
-                        if (msg.log) {
-                            log(msg.log);
-                        }
-                        if (msg.status === 'completed') {
-                            log("Download Complete! ✅");
-                            resetUI();
-                        }
-                        if (msg.error) {
-                            log("Error: " + msg.error);
-                            resetUI();
-                        }
-                    } catch (e) {
-                        // Ignore partial JSON
-                    }
+        if (!response.ok) {
+            // The backend rejected the request outright — that's JSON, not a stream
+            const err = await response.json().catch(() => ({}));
+            log("Error: " + (err.error || `HTTP ${response.status}`));
+        } else {
+            await readEventStream(response, (msg) => {
+                if (msg.log) {
+                    log(msg.log);
                 }
-            }
+                if (msg.status === 'completed') {
+                    log("Download Complete! ✅");
+                }
+                if (msg.error) {
+                    log("Error: " + msg.error);
+                }
+            });
         }
-    }).catch(e => {
+    } catch (e) {
         log("Network Error: " + e.message);
-        resetUI();
-    });
+    }
+
+    // Always re-enable the UI once the stream is over, however it ended
+    resetUI();
 }
 
 function resetUI() {
@@ -686,9 +770,47 @@ function switchUpdateTab(channel) {
     fetchReleases(channel);
 }
 
+// Release rows are built with textContent, never innerHTML — versions, branch
+// names and error strings all arrive over the network
+function showReleasesMessage(listEl, message) {
+    listEl.innerHTML = '';
+    const messageEl = document.createElement('div');
+    messageEl.className = 'releases-loading';
+    messageEl.textContent = message;
+    listEl.appendChild(messageEl);
+}
+
+function buildReleaseRow(label, badges, dateText) {
+    const row = document.createElement('div');
+    row.className = 'release-row';
+
+    const info = document.createElement('div');
+    info.className = 'release-info';
+
+    const versionEl = document.createElement('span');
+    versionEl.className = 'release-version';
+    versionEl.textContent = label;
+    info.appendChild(versionEl);
+
+    badges.forEach(badge => {
+        const badgeEl = document.createElement('span');
+        badgeEl.className = `release-badge ${badge.className}`;
+        badgeEl.textContent = badge.text;
+        info.appendChild(badgeEl);
+    });
+
+    const dateEl = document.createElement('span');
+    dateEl.className = 'release-date';
+    dateEl.textContent = dateText;
+
+    row.appendChild(info);
+    row.appendChild(dateEl);
+    return row;
+}
+
 async function fetchReleases(channel) {
     const listEl = document.getElementById('releasesList');
-    listEl.innerHTML = '<div class="releases-loading">Loading releases...</div>';
+    showReleasesMessage(listEl, 'Loading releases...');
     selectedRelease = null;
     document.getElementById('installSelectedBtn').disabled = true;
     document.getElementById('installSelectedBtn').textContent = 'Update';
@@ -700,12 +822,12 @@ async function fetchReleases(channel) {
             const data = await response.json();
 
             if (data.error) {
-                listEl.innerHTML = `<div class="releases-loading">Error: ${data.error}</div>`;
+                showReleasesMessage(listEl, `Error: ${data.error}`);
                 return;
             }
 
             if (!data.artifacts || data.artifacts.length === 0) {
-                listEl.innerHTML = '<div class="releases-loading">No alpha builds found</div>';
+                showReleasesMessage(listEl, 'No alpha builds found');
                 return;
             }
 
@@ -716,26 +838,18 @@ async function fetchReleases(channel) {
             let firstSelectable = null;
 
             data.artifacts.forEach(artifact => {
-                const row = document.createElement('div');
-                row.className = 'release-row';
-                row.dataset.version = artifact.branch;
-
                 const date = artifact.published_at
                     ? new Date(artifact.published_at).toLocaleDateString()
                     : '';
 
-                const versionBadge = artifact.version
-                    ? `<span class="release-badge current-badge">v${artifact.version}</span>`
-                    : '';
+                const badges = [];
+                if (artifact.version) {
+                    badges.push({ text: `v${artifact.version}`, className: 'current-badge' });
+                }
+                badges.push({ text: artifact.sha, className: 'pre-badge' });
 
-                row.innerHTML = `
-                    <div class="release-info">
-                        <span class="release-version">${artifact.branch}</span>
-                        ${versionBadge}
-                        <span class="release-badge pre-badge">${artifact.sha}</span>
-                    </div>
-                    <span class="release-date">${date}</span>
-                `;
+                const row = buildReleaseRow(artifact.branch, badges, date);
+                row.dataset.version = artifact.branch;
 
                 if (artifact.exe_asset) {
                     // Give it a synthetic version for the update flow
@@ -761,12 +875,12 @@ async function fetchReleases(channel) {
         const data = await response.json();
 
         if (data.error) {
-            listEl.innerHTML = `<div class="releases-loading">Error: ${data.error}</div>`;
+            showReleasesMessage(listEl, `Error: ${data.error}`);
             return;
         }
 
         if (!data.releases || data.releases.length === 0) {
-            listEl.innerHTML = '<div class="releases-loading">No releases found</div>';
+            showReleasesMessage(listEl, 'No releases found');
             return;
         }
 
@@ -778,25 +892,17 @@ async function fetchReleases(channel) {
         let firstSelectable = null;
 
         data.releases.forEach(release => {
-            const row = document.createElement('div');
-            row.className = 'release-row' + (release.is_current ? ' current' : '');
-            row.dataset.version = release.version;
-
             const date = release.published_at
                 ? new Date(release.published_at).toLocaleDateString()
                 : '';
 
             const badges = [];
-            if (release.is_current) badges.push('<span class="release-badge current-badge">current</span>');
-            if (release.prerelease) badges.push('<span class="release-badge pre-badge">pre-release</span>');
+            if (release.is_current) badges.push({ text: 'current', className: 'current-badge' });
+            if (release.prerelease) badges.push({ text: 'pre-release', className: 'pre-badge' });
 
-            row.innerHTML = `
-                <div class="release-info">
-                    <span class="release-version">v${release.version}</span>
-                    ${badges.join('')}
-                </div>
-                <span class="release-date">${date}</span>
-            `;
+            const row = buildReleaseRow(`v${release.version}`, badges, date);
+            if (release.is_current) row.classList.add('current');
+            row.dataset.version = release.version;
 
             if (!release.is_current && release.exe_asset) {
                 row.style.cursor = 'pointer';
@@ -817,7 +923,7 @@ async function fetchReleases(channel) {
         }
 
     } catch (e) {
-        listEl.innerHTML = `<div class="releases-loading">Failed to load: ${e.message}</div>`;
+        showReleasesMessage(listEl, `Failed to load: ${e.message}`);
     }
 }
 
@@ -845,6 +951,11 @@ async function installSelectedVersion() {
         return;
     }
 
+    if (!canSelfUpdate) {
+        alert('Self-update is only available in the packaged exe — please download the new version manually.');
+        return;
+    }
+
     // Store as pending and use starUpdate flow
     pendingUpdate = selectedRelease;
 
@@ -863,10 +974,11 @@ async function checkForUpdates(force = false) {
         const response = await fetch(`/api/update/check?${params}`);
         const data = await response.json();
 
-        if (data.skipped) return; // Cooldown, no need to check
+        if (data.skipped) return data; // Cooldown or disabled, no need to check
         if (data.error) {
             console.warn('Update check failed:', data.error);
-            return null;
+            // Return the payload so callers can show the real reason
+            return data;
         }
 
         if (data.available && data.update) {
@@ -952,6 +1064,11 @@ async function startUpdate() {
         return;
     }
 
+    if (!canSelfUpdate) {
+        alert('Self-update is only available in the packaged exe — please download the new version manually.');
+        return;
+    }
+
     // Hide banner, show progress modal
     document.getElementById('updateBanner').classList.add('hidden');
     const modal = document.getElementById('updateModal');
@@ -962,63 +1079,63 @@ async function startUpdate() {
     const asset = pendingUpdate.exe_asset;
     const params = new URLSearchParams({ url: asset.url, name: asset.name });
 
-    try {
-        const response = await fetch(`/api/update/download?${params}`);
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let downloadedPath = null;
-
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value);
-            const lines = chunk.split('\n\n');
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    try {
-                        const data = JSON.parse(line.substring(6));
-                        progressFill.style.width = data.percent + '%';
-                        status.textContent = data.status;
-
-                        if (data.success === true && data.path) {
-                            downloadedPath = data.path;
-                        } else if (data.success === false) {
-                            status.textContent = 'Update failed: ' + data.status;
-                            status.style.color = '#ff6b6b';
-                            setTimeout(() => modal.classList.add('hidden'), 3000);
-                            return;
-                        }
-                    } catch (e) { /* ignore partial JSON */ }
-                }
-            }
-        }
-
-        if (downloadedPath) {
-            status.textContent = 'Installing update... 🦭';
-            progressFill.style.width = '100%';
-
-            // Apply the update (app will exit and relaunch)
-            const applyResponse = await fetch('/api/update/apply', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ path: downloadedPath })
-            });
-            const applyData = await applyResponse.json();
-
-            if (applyData.success) {
-                status.textContent = 'Restarting with new version...';
-            } else {
-                status.textContent = 'Failed to apply update: ' + (applyData.error || 'Unknown error');
-                status.style.color = '#ff6b6b';
-                setTimeout(() => modal.classList.add('hidden'), 3000);
-            }
-        }
-    } catch (e) {
-        status.textContent = 'Update error: ' + e.message;
+    const showFailure = (message) => {
+        status.textContent = message;
         status.style.color = '#ff6b6b';
         setTimeout(() => modal.classList.add('hidden'), 3000);
+    };
+
+    try {
+        const response = await fetch(`/api/update/download?${params}`);
+
+        // A rejected download (e.g. untrusted host) answers with JSON, not a stream
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            showFailure('Update failed: ' + (err.error || `HTTP ${response.status}`));
+            return;
+        }
+
+        let downloadedPath = null;
+        let failed = false;
+
+        await readEventStream(response, (data) => {
+            progressFill.style.width = data.percent + '%';
+            status.textContent = data.status;
+
+            if (data.success === true && data.path) {
+                downloadedPath = data.path;
+            } else if (data.success === false) {
+                failed = true;
+                showFailure('Update failed: ' + data.status);
+                return false;
+            }
+        });
+
+        if (failed) return;
+
+        if (!downloadedPath) {
+            showFailure('Update failed: the download ended without a file.');
+            return;
+        }
+
+        status.textContent = 'Installing update... 🦭';
+        progressFill.style.width = '100%';
+
+        // Apply the update (app will exit and relaunch)
+        const applyResponse = await fetch('/api/update/apply', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: downloadedPath })
+        });
+        const applyData = await applyResponse.json();
+
+        if (applyData.success) {
+            status.textContent = 'Restarting with new version...';
+        } else {
+            showFailure('Failed to apply update: ' + (applyData.error || 'Unknown error'));
+        }
+    } catch (e) {
+        showFailure('Update error: ' + e.message);
     }
 }
 
@@ -1041,8 +1158,14 @@ async function loadUpdateSettings() {
         if (footerVersion && settings.current_version) {
             footerVersion.textContent = `v${settings.current_version}`;
         }
+
+        // Self-update only works for the packaged exe
+        canSelfUpdate = settings.can_self_update !== false;
+
+        return settings;
     } catch (e) {
         console.warn('Could not load update settings:', e);
+        return null;
     }
 }
 
