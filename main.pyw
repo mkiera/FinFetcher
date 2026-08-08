@@ -8,6 +8,7 @@ Built with Flask + PyWebView for native desktop experience.
 import os
 import sys
 import json
+import ssl
 import subprocess
 import webview
 import threading
@@ -21,6 +22,32 @@ from flask import Flask, request, jsonify, send_from_directory, Response
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 from urllib.parse import urlparse
+
+# certifi ships with yt-dlp; the explicit import also tells PyInstaller to
+# bundle the CA bundle into the exe.
+try:
+    import certifi
+except ImportError:
+    certifi = None
+
+_ssl_context = None
+
+
+def get_ssl_context():
+    """SSL context used for every HTTPS request this app makes.
+
+    Windows' own certificate store can hold an expired root that OpenSSL
+    then picks when building a chain, so verification fails for hosts the
+    rest of the system trusts fine (nightly.link is one). certifi's bundle
+    avoids that; fall back to the system default if it isn't available.
+    """
+    global _ssl_context
+    if _ssl_context is None:
+        try:
+            _ssl_context = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            _ssl_context = ssl.create_default_context()
+    return _ssl_context
 
 
 class FFmpegManager:
@@ -126,7 +153,7 @@ class FFmpegManager:
             zip_path = os.path.join(temp_dir, 'ffmpeg.zip')
             
             try:
-                with urlopen(req, timeout=60) as response:
+                with urlopen(req, timeout=60, context=get_ssl_context()) as response:
                     total_size = int(response.headers.get('Content-Length', 0))
                     downloaded = 0
                     chunk_size = 1024 * 64  # 64KB chunks
@@ -231,6 +258,7 @@ class UpdateManager:
     def __init__(self):
         self._config_file = os.path.join(FFmpegManager.get_app_data_dir(), 'config.json')
         self._config = self._load_config()
+        self.last_download_error = None
 
     def _load_config(self):
         """Load update-related config from the shared config file."""
@@ -374,7 +402,7 @@ class UpdateManager:
                 'User-Agent': 'FinFetcher-Updater/1.0',
                 'Accept': 'application/vnd.github.v3+json',
             })
-            with urlopen(req, timeout=15) as response:
+            with urlopen(req, timeout=15, context=get_ssl_context()) as response:
                 releases = json.loads(response.read().decode('utf-8'))
 
             if not releases:
@@ -437,10 +465,13 @@ class UpdateManager:
 
     def download_update(self, asset_url, asset_name, progress_callback=None):
         """Download an update asset to a temp directory.
-        
+
         If the downloaded file is a zip, extracts the first .exe from it.
         Returns the path to the downloaded/extracted exe, or None on failure.
+        On failure the reason is left in self.last_download_error so the
+        caller can show it instead of a bare "Download failed".
         """
+        self.last_download_error = None
         try:
             download_dir = os.path.join(FFmpegManager.get_app_data_dir(), 'updates')
             os.makedirs(download_dir, exist_ok=True)
@@ -449,7 +480,7 @@ class UpdateManager:
 
             req = Request(asset_url, headers={'User-Agent': 'FinFetcher-Updater/1.0'})
 
-            with urlopen(req, timeout=120) as response:
+            with urlopen(req, timeout=120, context=get_ssl_context()) as response:
                 total_size = int(response.headers.get('Content-Length', 0))
                 downloaded = 0
                 chunk_size = 1024 * 64
@@ -475,8 +506,9 @@ class UpdateManager:
                 with zipfile.ZipFile(dest_path, 'r') as zf:
                     exe_files = [n for n in zf.namelist() if n.lower().endswith('.exe')]
                     if not exe_files:
+                        self.last_download_error = 'No exe found in the downloaded zip'
                         if progress_callback:
-                            progress_callback(0, 'No exe found in zip')
+                            progress_callback(0, self.last_download_error)
                         return None
                     zf.extract(exe_files[0], download_dir)
                     extracted_path = os.path.join(download_dir, exe_files[0])
@@ -487,6 +519,7 @@ class UpdateManager:
             return dest_path
 
         except Exception as e:
+            self.last_download_error = str(e)
             if progress_callback:
                 progress_callback(0, f"Download failed: {str(e)}")
             return None
@@ -677,7 +710,7 @@ def setup_install_sync():
             zip_path = os.path.join(temp_dir, 'ffmpeg.zip')
             
             try:
-                with urlopen(req, timeout=120) as response:
+                with urlopen(req, timeout=120, context=get_ssl_context()) as response:
                     total_size = int(response.headers.get('Content-Length', 0))
                     downloaded = 0
                     chunk_size = 1024 * 64
@@ -821,7 +854,9 @@ def update_download():
             if result[0]:
                 yield f"data: {json.dumps({'percent': 100, 'status': 'Download complete!', 'success': True, 'path': result[0]})}\n\n"
             else:
-                yield f"data: {json.dumps({'percent': 0, 'status': 'Download failed', 'success': False})}\n\n"
+                # Report the actual reason (TLS, 404, disk) — not just "failed"
+                reason = update_manager.last_download_error or 'unknown error'
+                yield f"data: {json.dumps({'percent': 0, 'status': f'Download failed: {reason}', 'success': False})}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'percent': 0, 'status': f'Error: {str(e)}', 'success': False})}\n\n"
@@ -896,7 +931,7 @@ def update_releases():
             'User-Agent': 'FinFetcher-Updater/1.0',
             'Accept': 'application/vnd.github.v3+json',
         })
-        with urlopen(req, timeout=15) as response:
+        with urlopen(req, timeout=15, context=get_ssl_context()) as response:
             releases = json.loads(response.read().decode('utf-8'))
 
         result = []
@@ -965,7 +1000,7 @@ def update_artifacts():
             'User-Agent': 'FinFetcher-Updater/1.0',
             'Accept': 'application/vnd.github.v3+json',
         })
-        with urlopen(req, timeout=15) as response:
+        with urlopen(req, timeout=15, context=get_ssl_context()) as response:
             data = json.loads(response.read().decode('utf-8'))
 
         result = []
@@ -1003,7 +1038,7 @@ def update_artifacts():
                         'User-Agent': 'FinFetcher-Updater/1.0',
                         'Accept': 'application/vnd.github.v3+json',
                     })
-                with urlopen(art_req, timeout=5) as art_resp:
+                with urlopen(art_req, timeout=5, context=get_ssl_context()) as art_resp:
                     artifacts = json.loads(art_resp.read().decode('utf-8')).get('artifacts', [])
                 artifacts = [a for a in artifacts if not a.get('expired')]
                 if artifacts:
@@ -1017,7 +1052,7 @@ def update_artifacts():
             try:
                 ver_url = f'https://raw.githubusercontent.com/mkiera/FinFetcher/{run.get("head_sha", "")}/version.txt'
                 ver_req = Request(ver_url, headers={'User-Agent': 'FinFetcher-Updater/1.0'})
-                with urlopen(ver_req, timeout=5) as ver_resp:
+                with urlopen(ver_req, timeout=5, context=get_ssl_context()) as ver_resp:
                     version = ver_resp.read().decode('utf-8').strip()
             except Exception:
                 pass
