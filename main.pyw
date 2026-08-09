@@ -18,7 +18,7 @@ import zipfile
 import tempfile
 import shutil
 import yt_dlp
-from yt_dlp.utils import download_range_func
+from yt_dlp.utils import DownloadCancelled, download_range_func
 from flask import Flask, request, jsonify, send_from_directory, Response
 from urllib.request import urlopen, Request
 from urllib.error import URLError
@@ -1812,16 +1812,26 @@ def apply_performance_opts(ydl_opts, settings, download_type, save_path):
     settings get wired in.
     """
     fragments = settings['concurrent_fragments']
-    ydl_opts['concurrent_fragment_downloads'] = fragments
 
     # The UI collects KB/s; yt-dlp wants bytes/sec. A present-but-zero
     # ratelimit is worse than no limit — yt-dlp divides by it — so an
     # unlimited setting has to leave the key out entirely.
     rate_limit_kbps = settings['rate_limit_kbps']
     if rate_limit_kbps > 0:
-        # The limit is applied per download thread, so N parallel fragments
-        # would otherwise let the total run at N times the cap.
-        ydl_opts['ratelimit'] = max(1, rate_limit_kbps * 1024 // max(1, fragments))
+        # Exactly what the user asked for. Dividing it by the fragment count
+        # made the cap that many times too strict on the common case: a
+        # progressive download is a single stream, and concurrent fragments
+        # only exist for native HLS/DASH.
+        ydl_opts['ratelimit'] = max(1, rate_limit_kbps * 1024)
+        # FileDownloader.slow_down throttles the transfer it is called from,
+        # using that transfer's own byte counter, so N fragments in flight
+        # would each be allowed the full limit and the total would run at N
+        # times the cap. One fragment at a time is what makes the typed
+        # number the real ceiling in the fragmented case too; a progressive
+        # download has one stream regardless, so nothing is lost there.
+        fragments = 1
+
+    ydl_opts['concurrent_fragment_downloads'] = fragments
 
     # The archive lets a re-run of a playlist skip what it already fetched.
     # Never for a single video: there the user asked for this one file, and
@@ -1935,7 +1945,12 @@ def apply_media_opts(ydl_opts, settings, mode, save_path, fast_trim=False):
         postprocessors.append({
             'key': 'ModifyChapters',
             'remove_sponsor_segments': sponsor_categories,
-            'force_keyframes': settings['precise_trim'],
+            # Not precise_trim: that setting is about where a trim cuts. Here
+            # force_keyframes re-encodes the entire file so a keyframe lands on
+            # each cut point (ModifyChapters.remove_chapters -> force_keyframes),
+            # which turned every SponsorBlock removal into a full re-encode and
+            # left the .keyframes.temp file behind. yt-dlp's own default is off.
+            'force_keyframes': False,
         })
     if settings['embed_metadata'] or embed_chapters:
         postprocessors.append({
@@ -1954,7 +1969,10 @@ def apply_media_opts(ydl_opts, settings, mode, save_path, fast_trim=False):
     if split_chapters:
         postprocessors.append({
             'key': 'FFmpegSplitChapters',
-            'force_keyframes': settings['precise_trim'],
+            # Same as ModifyChapters above: this re-encodes the whole file to
+            # put a keyframe at every chapter boundary, which is not what the
+            # trim setting asked for. Off, as in yt-dlp.
+            'force_keyframes': False,
         })
 
     if postprocessors:
@@ -1974,6 +1992,261 @@ def apply_media_opts(ydl_opts, settings, mode, save_path, fast_trim=False):
             save_path, '%(title)s - %(section_number)03d %(section_title)s.%(ext)s')
     if extra_outtmpl:
         ydl_opts['outtmpl'] = {'default': ydl_opts['outtmpl'], **extra_outtmpl}
+
+
+def _scrap_name_roots(path, folder):
+    """Reduce a path yt-dlp reported to the file name its scraps are named for.
+
+    Returns (name, stem) for a path that lives directly in folder, or None.
+    yt-dlp writes to "<name>.part", and a fragmented download writes
+    "<name>.part-Frag7" (and "<name>.part-Frag7.part") beside it, so a
+    reported in-progress path has to be wound back to the finished name
+    before anything is matched against it.
+    """
+    if not isinstance(path, str) or not path:
+        return None
+    try:
+        real = os.path.realpath(path)
+    except Exception:
+        return None
+    # Only the save folder itself — never a subfolder, never anywhere else
+    if os.path.dirname(real) != folder:
+        return None
+
+    name = os.path.basename(real)
+    while name:
+        if name.lower().endswith('.part'):
+            name = name[:-len('.part')]
+            continue
+        marker = name.rfind('-Frag')
+        if marker > 0 and name[marker + len('-Frag'):].isdigit():
+            name = name[:marker]
+            continue
+        break
+    if not name:
+        return None
+    return name, os.path.splitext(name)[0]
+
+
+def _remove_file_with_retry(path, attempts=4, delay=0.5):
+    """Delete a file a just-stopped ffmpeg may still be holding open.
+
+    Windows refuses the unlink until the last handle is closed, and ffmpeg's
+    can outlive the run — or the terminate() that ended it — by a moment, so
+    one refusal means "not yet" rather than "impossible".
+
+    Returns (removed, error). error is None when the file went away or was
+    never there, so a caller can tell "nothing to do" from "still locked".
+    """
+    for attempt in range(attempts):
+        try:
+            os.remove(path)
+            return True, None
+        except FileNotFoundError:
+            return False, None
+        except OSError as e:
+            if attempt == attempts - 1:
+                return False, e
+            time.sleep(delay)
+    return False, None
+
+
+def _terminate_process(proc):
+    """Stop a child process and wait until it has actually gone.
+
+    Returning while it is still dying is the bug this guards against: on
+    Windows the file it was writing stays locked until the process exits, and
+    the caller is usually about to delete that file.
+    """
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+    except Exception:
+        # Already gone, or never really started. Either way there is nothing
+        # left to stop, and no caller can do anything useful about it.
+        pass
+
+
+def _cleanup_download_scraps(save_path, seen_files, cancelled=False):
+    """Delete the temp files a finished or failed download can leave behind.
+
+    Two kinds, both named after the file that was being written:
+      - "<stem>.keyframes.temp.<ext>", the keyframe re-encode that
+        FFmpegPostProcessor.force_keyframes makes (yt_dlp/postprocessor/
+        ffmpeg.py:389-397, reached from ModifyChapters and
+        FFmpegSplitChapters). yt-dlp deletes it itself, but that delete fails
+        on Windows while ffmpeg still holds the handle.
+      - "<name>.part" and its "-FragN" pieces, the in-progress files
+        FileDownloader.temp_name gives a download (yt_dlp/downloader/
+        common.py:217-222).
+
+    Only names derived from a path this run actually reported are considered,
+    and only files sitting directly in save_path: a scrap that cannot be
+    attributed to this download is somebody else's file and is left alone.
+    The files the download produced are skipped too, in case a video is
+    genuinely titled like one of these temp names.
+
+    cancelled widens that last exemption: a run stopped part-way through
+    post-processing leaves its output under the name the finished file would
+    have had (yt-dlp renames off ".part" before the post-processors run), and
+    that would sit in the folder passing for a completed download. The caller
+    only sets this when the output really is part-written — see
+    finish_cancelled in download().
+
+    Returns log lines for anything that could not be removed.
+    """
+    messages = []
+    try:
+        folder = os.path.realpath(save_path)
+    except Exception:
+        return messages
+
+    names, stems, produced = set(), set(), set()
+    for path in list(seen_files):
+        roots = _scrap_name_roots(path, folder)
+        if roots is None:
+            continue
+        name, stem = roots
+        names.add(name)
+        stems.add(stem)
+        produced.add(os.path.join(folder, name))
+
+    if not names:
+        return messages
+
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return messages
+
+    removed = []
+    for entry in entries:
+        target = os.path.join(folder, entry)
+        if not os.path.isfile(target):
+            continue
+        if target in produced:
+            if not cancelled:
+                continue
+        else:
+            is_scrap = (any(entry.startswith(f'{name}.part') for name in names)
+                        or any(entry.startswith(f'{stem}.keyframes.temp.') for stem in stems))
+            if not is_scrap:
+                continue
+
+        gone, error = _remove_file_with_retry(target)
+        if gone:
+            removed.append(entry)
+        elif error is not None:
+            messages.append(
+                f'> [FinFetcher] Could not remove leftover file {entry}: {error}')
+
+    if removed:
+        label = ('Removed the partial download'
+                 if cancelled else 'Cleaned up leftover files')
+        messages.insert(0, f'> [FinFetcher] {label}: ' + ', '.join(sorted(removed)))
+    return messages
+
+
+class DownloadJob:
+    """One download in flight, plus the handles needed to stop it.
+
+    Cancel arrives on the Flask thread serving /api/download/cancel, while the
+    work is happening on the download thread and inside a child process, so
+    both handles have to live somewhere all three can reach.
+
+    yt-dlp itself only needs the flag: raising DownloadCancelled from a hook
+    stops it, because YoutubeDL re-raises that exception rather than retrying
+    it (_handle_extraction_exceptions, YoutubeDL.py:1699) and lets it out of
+    download() (__download_wrapper, :3648). ffmpeg is a separate process that
+    never sees the flag, so its Popen is kept here to be killed directly — an
+    ffmpeg left running is exactly what held the handle on the leftover file
+    the user could not delete.
+    """
+
+    def __init__(self):
+        self._cancelled = threading.Event()
+        self._lock = threading.Lock()
+        self._process = None
+
+    def is_cancelled(self):
+        return self._cancelled.is_set()
+
+    def cancel(self):
+        """Ask this download to stop. Safe to call from any thread."""
+        self._cancelled.set()
+        self._stop_process()
+
+    def attach_process(self, proc):
+        """Track a child process so a cancel can reach it.
+
+        A cancel that landed while the process was being spawned has to take
+        effect here as well, or that child would outlive the download that
+        owns it — which is the whole point of tracking it.
+        """
+        with self._lock:
+            self._process = proc
+        if self.is_cancelled():
+            self._stop_process()
+
+    def detach_process(self, proc):
+        """Stop tracking a process the caller is taking responsibility for."""
+        with self._lock:
+            if self._process is proc:
+                self._process = None
+
+    def _stop_process(self):
+        with self._lock:
+            proc = self._process
+        _terminate_process(proc)
+
+
+# This app runs one download at a time, so the cancel endpoint only needs to
+# know about one job. A real queue would need an id per download and a way for
+# the UI to name them; that is a later phase, not what a Cancel button needs.
+_download_job_lock = threading.Lock()
+_current_download_job = None
+
+
+def _set_current_download_job(job):
+    """Make job the download that /api/download/cancel acts on."""
+    global _current_download_job
+    with _download_job_lock:
+        _current_download_job = job
+
+
+def _clear_current_download_job(job):
+    """Forget job once its stream is over.
+
+    Identity-checked: if a newer download has already registered itself,
+    clearing unconditionally would leave the live one with no cancel path.
+    """
+    global _current_download_job
+    with _download_job_lock:
+        if _current_download_job is job:
+            _current_download_job = None
+
+
+@app.route('/api/download/cancel', methods=['POST'])
+def cancel_download():
+    """Stop the running download, if there is one.
+
+    Answers 200 either way: "nothing is running" is an answer, not a failed
+    request. The download's own SSE stream is what reports the cancellation to
+    the user, so this only has to say whether it found something to stop.
+    """
+    with _download_job_lock:
+        job = _current_download_job
+    if job is None:
+        return jsonify({'success': False, 'error': 'No download is running'})
+    job.cancel()
+    return jsonify({'success': True})
 
 
 @app.route('/api/download', methods=['POST'])
@@ -2078,9 +2351,31 @@ def download():
     # Queues for communicating with thread
     msg_queue = queue.Queue()
     result_queue = queue.Queue()
-    
+
+    # Every path this run reports, so the cleanup at the end only ever touches
+    # scraps it can trace back to this download. Written from the download
+    # thread, read once it has finished.
+    seen_files = set()
+
+    def remember_file(path):
+        """Note a path yt-dlp reported, for the leftover cleanup."""
+        if isinstance(path, str) and path:
+            seen_files.add(path)
+
+    # Registered below, before the response is handed back, so a Cancel that
+    # lands the instant the download starts still finds this run.
+    job = DownloadJob()
+
     def progress_hook(d):
         """Callback for yt-dlp progress."""
+        remember_file(d.get('filename'))
+        remember_file(d.get('tmpfilename'))
+        # The one place a running download can be interrupted from: this fires
+        # on every chunk, and DownloadCancelled is the exception YoutubeDL
+        # treats as "stop" rather than as an error worth retrying. Raised
+        # after the paths are recorded so the cleanup still knows about them.
+        if job.is_cancelled():
+            raise DownloadCancelled('Cancelled by the user')
         if d['status'] == 'downloading':
             try:
                 percent = d.get('_percent_str', '?').strip()
@@ -2101,9 +2396,19 @@ def download():
     
     def postprocessor_hook(d):
         """Callback for yt-dlp post-processing (e.g., audio conversion)."""
+        # Post-processing renames as it goes (extraction, merge, chapter cut),
+        # so each stage's path is another name the scraps can be based on.
+        final_path = d.get('info_dict', {}).get('filepath')
+        remember_file(final_path)
+        # Fires either side of every post-processor (PostProcessorMetaClass.
+        # run_wrapper in yt_dlp/postprocessor/common.py:17-25), so cancelling
+        # here stops the chain before the next stage starts. An ffmpeg step
+        # already running inside yt-dlp is not ours to kill — it finishes, and
+        # then nothing further runs.
+        if job.is_cancelled():
+            raise DownloadCancelled('Cancelled by the user')
         if d['status'] == 'finished':
             # Capture the final filepath after post-processing
-            final_path = d.get('info_dict', {}).get('filepath')
             if final_path:
                 msg_queue.put({'log': f"[postprocess] Final file: {final_path}"})
                 result_queue.put({'final_file': final_path})
@@ -2116,7 +2421,19 @@ def download():
                 ydl.download([url])
             result_queue.put({'success': True})
         except Exception as e:
-            result_queue.put({'success': False, 'error': str(e)})
+            # A cancel is not a failure to show the user as an error. It
+            # normally arrives as the DownloadCancelled our own hook raised,
+            # but an aborted step can surface as whatever it was in the middle
+            # of, so the flag decides how this is reported, not the type.
+            if job.is_cancelled() or isinstance(e, DownloadCancelled):
+                result_queue.put({'success': False, 'cancelled': True})
+            else:
+                result_queue.put({'success': False, 'error': str(e)})
+
+    # The threads the attempts run on. The download thread is a daemon and
+    # keeps going if the stream is dropped, so the cleanup path needs a way to
+    # ask whether anything is still writing.
+    attempt_threads = []
 
     try:
         def run_attempt(opts):
@@ -2128,13 +2445,21 @@ def download():
             payload is returned rather than yielded so a retried attempt does
             not report an error the user never needs to see.
             """
+            # Cancelled before this attempt could start — nothing to run, and
+            # starting a thread here would only give the cleanup a live writer
+            # to race.
+            if job.is_cancelled():
+                return None, False, None
+
             # Start download thread
             t = threading.Thread(target=run_download_thread, args=(opts,), daemon=True)
+            attempt_threads.append(t)
             t.start()
 
             final_file = None
             download_success = False
             error_payload = None
+            cancel_logged = False
 
             # Monitor progress
             while True:
@@ -2155,11 +2480,20 @@ def download():
                 except queue.Empty:
                     pass
 
-                # 2. Check if thread finished
+                # 2. Say so once when a cancel is being acted on. The hooks
+                #    stop yt-dlp at the next chunk or post-processing stage,
+                #    which is immediate mid-download but has to wait out an
+                #    ffmpeg step that is already running, and silence there
+                #    reads as a hang.
+                if job.is_cancelled() and not cancel_logged:
+                    cancel_logged = True
+                    yield f"data: {json.dumps({'log': '> [FinFetcher] Cancelling — stopping the download...'})}\n\n"
+
+                # 3. Check if thread finished
                 if not t.is_alive() and msg_queue.empty():
                     break
-                
-                # 3. Check for specific result updates (filename, success)
+
+                # 4. Check for specific result updates (filename, success)
                 try:
                     while True:
                         res = result_queue.get_nowait()
@@ -2167,7 +2501,10 @@ def download():
                             final_file = res['final_file']
                         if 'success' in res:
                             download_success = res['success']
-                            if not res['success']:
+                            # A cancel carries no error to show, and leaving
+                            # error_payload None also keeps the fast-trim
+                            # fallback from re-running the whole download.
+                            if not res['success'] and not res.get('cancelled'):
                                 error_payload = {'error': res.get('error')}
                 except queue.Empty:
                     pass
@@ -2187,14 +2524,35 @@ def download():
                         final_file = res['final_file']
                     if 'success' in res:
                         download_success = res['success']
-                        if not res['success']:
+                        if not res['success'] and not res.get('cancelled'):
                             error_payload = {'error': res.get('error')}
             except queue.Empty:
                 pass
 
             return final_file, download_success, error_payload
 
-        def generate():
+        def finish_cancelled(final_file, download_success):
+            """End the stream after a cancel, leaving nothing half-written.
+
+            What goes and what stays depends on how far the run got. A
+            download that reached its final file is a real, complete file the
+            user has — cancelling the trim that came after it is no reason to
+            destroy it — and a playlist's earlier entries are finished files
+            for the same reason. A run stopped mid-flight has only
+            part-written output, which yt-dlp has already renamed off ".part"
+            by the time the post-processors run, so it would otherwise sit in
+            the folder wearing the finished name.
+            """
+            keep_output = (bool(download_success and final_file)
+                           or download_type != 'single')
+            for message in _cleanup_download_scraps(save_path, seen_files,
+                                                    cancelled=not keep_output):
+                yield f"data: {json.dumps({'log': message})}\n\n"
+            if download_success and final_file:
+                yield f"data: {json.dumps({'log': f'> [FinFetcher] The download itself had already finished, so {final_file} was kept.'})}\n\n"
+            yield f"data: {json.dumps({'status': 'cancelled'})}\n\n"
+
+        def download_stream():
             trimmed_on_download = False
             final_file, download_success, error_payload = yield from run_attempt(ydl_opts)
 
@@ -2217,9 +2575,11 @@ def download():
             if error_payload:
                 yield f"data: {json.dumps(error_payload)}\n\n"
 
-            # Post-download trimming (only when the download could not do it)
+            # Post-download trimming (only when the download could not do it).
+            # Never start a fresh re-encode after a cancel — that would be a
+            # new ffmpeg process spawned by a run the user has already stopped.
             can_trim = bool(trim_requested and download_success and final_file
-                            and not trimmed_on_download)
+                            and not trimmed_on_download and not job.is_cancelled())
 
             if can_trim and download_type != 'single':
                 # A playlist has no single file to trim — the stale checkbox
@@ -2303,11 +2663,26 @@ def download():
                         creationflags=creationflags
                     )
                     
-                    for tline in trim_proc.stdout:
-                        yield f"data: {json.dumps({'log': f'[ffmpeg] {tline.strip()}'})}\n\n"
-                        
-                    trim_proc.wait()
-                    
+                    # Cancel has to reach this process directly: it is our
+                    # child, not yt-dlp's, and the flag means nothing to it.
+                    # An ffmpeg left running past the download is what held
+                    # the handle on the file the user could not delete.
+                    job.attach_process(trim_proc)
+                    try:
+                        for tline in trim_proc.stdout:
+                            yield f"data: {json.dumps({'log': f'[ffmpeg] {tline.strip()}'})}\n\n"
+
+                        trim_proc.wait()
+                    finally:
+                        # However this block is left — normally, killed by a
+                        # cancel, or because the stream was dropped mid-encode
+                        # and the generator is closing — ffmpeg must not
+                        # outlive it. An abandoned one keeps its output file
+                        # locked, which is the leftover that could not be
+                        # deleted.
+                        job.detach_process(trim_proc)
+                        _terminate_process(trim_proc)
+
                     # Only replace the original if ffmpeg actually produced something —
                     # an empty output would otherwise destroy the download.
                     trimmed_ok = (
@@ -2316,7 +2691,19 @@ def download():
                         and os.path.getsize(trimmed_file) > 0
                     )
 
-                    if trimmed_ok:
+                    if job.is_cancelled():
+                        # Killed mid-encode, so whatever is on disk is a
+                        # fragment of a trim nobody asked to keep. The
+                        # untrimmed download stays: it is complete, and the
+                        # cancel was of the trim, not of it.
+                        removed, error = _remove_file_with_retry(trimmed_file)
+                        if error is not None:
+                            yield f"data: {json.dumps({'log': f'> [FinFetcher] Trim stopped, but the partial file could not be removed: {error}'})}\n\n"
+                        elif removed:
+                            yield f"data: {json.dumps({'log': '> [FinFetcher] Trim stopped — the partial trim was removed.'})}\n\n"
+                        else:
+                            yield f"data: {json.dumps({'log': '> [FinFetcher] Trim stopped before it wrote anything.'})}\n\n"
+                    elif trimmed_ok:
                         yield f"data: {json.dumps({'log': '> [FinFetcher] Trim successful! Replacing original file...'})}\n\n"
                         try:
                             if os.path.exists(final_file):
@@ -2337,16 +2724,55 @@ def download():
                 except Exception as e:
                     yield f"data: {json.dumps({'log': f'> [FinFetcher] Trim error: {e}'})}\n\n"
             
+            # A cancelled run ends here rather than reporting a result: it has
+            # neither completed nor failed, and its own cleanup rules differ.
+            if job.is_cancelled():
+                yield from finish_cancelled(final_file, download_success)
+                return
+
+            # Either way — finished, failed, or fell back — the run can have
+            # left a keyframe re-encode or a .part file behind. The download
+            # thread is done by now, so nothing still being written is at risk.
+            for message in _cleanup_download_scraps(save_path, seen_files):
+                yield f"data: {json.dumps({'log': message})}\n\n"
+
             # Send final status
             if download_success:
                 yield f"data: {json.dumps({'status': 'completed'})}\n\n"
             else:
                  # Error already sent above
                  pass
-                 
+
+        def generate():
+            """Stream the download, cleaning up after it however it ends.
+
+            A dropped stream — the window closes, the request is aborted —
+            never reaches the cleanup inside download_stream, so it happens
+            here instead. A generator cannot yield while it is closing, so
+            that path cleans up silently, and only once no attempt is still
+            writing: deleting the .part file of a live download would be
+            worse than leaving it.
+            """
+            completed = False
+            try:
+                for chunk in download_stream():
+                    yield chunk
+                completed = True
+            finally:
+                # However this ended, there is no longer a download for
+                # /api/download/cancel to act on.
+                _clear_current_download_job(job)
+                if not completed and not any(t.is_alive() for t in attempt_threads):
+                    _cleanup_download_scraps(save_path, seen_files,
+                                             cancelled=job.is_cancelled()
+                                             and download_type == 'single')
+
+        _set_current_download_job(job)
         return Flask.response_class(generate(), mimetype='text/event-stream')
 
     except Exception as e:
+        # Nothing is going to run, so nothing should look cancellable
+        _clear_current_download_job(job)
         return jsonify({'error': str(e)}), 500
 
 

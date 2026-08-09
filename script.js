@@ -10,6 +10,9 @@ let videoDuration = 0;
 let cachedVideoInfo = null;
 let cachedInfoUrl = null;
 let canSelfUpdate = true;
+// True only while the download stream is open, which is the only window in
+// which /api/download/cancel has anything to act on
+let downloadInFlight = false;
 
 // Initialize - check for ffmpeg first
 checkSetup();
@@ -228,6 +231,19 @@ function selectMode(mode) {
         if (downloadLocationToggle) downloadLocationToggle.style.display = '';
         downloadBtn.textContent = 'Download';
     }
+
+    // Stream mode has no download to stop, and the mode cards stay clickable
+    // while one is running, so the control has to follow the mode as well
+    updateCancelVisibility();
+}
+
+// Cancel is only offered when there is something to cancel. Anything else
+// would POST to a backend with no running download and then sit on
+// "Cancelling..." waiting for a stream event that never comes.
+function updateCancelVisibility() {
+    const cancelBtn = document.getElementById('cancelBtn');
+    const show = downloadInFlight && currentMode !== 'stream';
+    cancelBtn.classList.toggle('hidden', !show);
 }
 
 function toggleAdvanced() {
@@ -624,12 +640,23 @@ async function startDownload(type) {
             const err = await response.json().catch(() => ({}));
             log("Error: " + (err.error || `HTTP ${response.status}`));
         } else {
+            // The request was accepted, so from here there is a running
+            // download for /api/download/cancel to act on
+            downloadInFlight = true;
+            updateCancelVisibility();
+
             await readEventStream(response, (msg) => {
                 if (msg.log) {
                     log(msg.log);
                 }
                 if (msg.status === 'completed') {
                     log("Download Complete! ✅");
+                }
+                // A stopped download is not a finished one. Keep reading rather
+                // than returning false — the backend still reports its cleanup
+                // after this, and the stream ends on its own.
+                if (msg.status === 'cancelled') {
+                    log("Download cancelled.");
                 }
                 if (msg.error) {
                     log("Error: " + msg.error);
@@ -644,10 +671,51 @@ async function startDownload(type) {
     resetUI();
 }
 
+async function cancelDownload() {
+    const cancelBtn = document.getElementById('cancelBtn');
+    // A second click would only fire a second POST, so the button reports the
+    // request instead of staying live. It is disabled rather than hidden so the
+    // user can still see that the cancel is being dealt with.
+    if (cancelBtn.disabled) return;
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = "Cancelling...";
+    log("Cancelling download...");
+
+    // The button is left alone on success: the stream reports the cancellation,
+    // and resetUI restores the idle state once it closes.
+    const failed = (reason) => {
+        log("Couldn't cancel: " + reason);
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = "Cancel";
+    };
+
+    try {
+        const response = await fetch('/api/download/cancel', { method: 'POST' });
+        const data = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+            failed(data.error || `HTTP ${response.status}`);
+        } else if (!data.success) {
+            // 200 without success means the backend has no download to stop,
+            // so reporting the status code would say nothing useful
+            failed(data.error || 'the download was not stopped');
+        }
+    } catch (e) {
+        failed(e.message);
+    }
+}
+
 function resetUI() {
     document.getElementById('downloadBtn').disabled = false;
     document.getElementById('downloadBtn').textContent = "Download";
     toggleTrimInputs();
+
+    // However the stream ended, there is no longer anything to cancel
+    downloadInFlight = false;
+    const cancelBtn = document.getElementById('cancelBtn');
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = "Cancel";
+    updateCancelVisibility();
 
     // Ensure Advanced Options visibility matches chevron state
     const advancedContent = document.getElementById('advancedContent');

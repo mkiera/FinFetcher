@@ -518,6 +518,39 @@ button:active {
     transform: scale(0.98);
 }
 
+/* Download + Cancel share a row. With Cancel hidden the remaining button fills
+   the row exactly as it did before there was a second one. */
+.download-actions {
+    display: flex;
+    gap: 15px;
+}
+
+.download-actions button {
+    flex: 1;
+}
+
+/* Same treatment as the secondary buttons in the modals — the control that
+   stops the download must not compete with the one that starts it */
+.download-actions button.secondary {
+    background: rgba(255, 255, 255, 0.1);
+    box-shadow: none;
+}
+
+.download-actions button.secondary:hover {
+    background: rgba(255, 255, 255, 0.2);
+}
+
+/* Only the cancel button: the download button's disabled look is unchanged */
+#cancelBtn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+#cancelBtn:disabled:hover {
+    transform: none;
+    filter: none;
+}
+
 /* === Log Container === */
 #progressArea {
     margin-top: 25px;

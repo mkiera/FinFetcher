@@ -196,7 +196,13 @@
                 <span class="toggle-label">Ask for Download Location</span>
             </div>
 
-            <button id="downloadBtn" onclick="initiateDownload()">Download</button>
+            <!-- Cancel sits to the right so the primary button keeps the left
+                 edge of the row. It stays hidden until a download is actually
+                 in flight - see updateCancelVisibility(). -->
+            <div class="download-actions">
+                <button id="downloadBtn" onclick="initiateDownload()">Download</button>
+                <button id="cancelBtn" class="secondary hidden" onclick="cancelDownload()">Cancel</button>
+            </div>
 
             <div id="progressArea" class="hidden">
                 <div class="log-container" id="logContainer">
@@ -358,7 +364,9 @@
                 <div class="control-row">
                     <div class="settings-label">
                         <span>Speed limit (KB/s)</span>
-                        <span class="settings-hint">0 means unlimited.</span>
+                        <span class="settings-hint">A ceiling for the whole download, not per connection. Setting
+                            one turns off concurrent fragments, since each of those would get the full limit to
+                            itself. 0 means unlimited.</span>
                     </div>
                     <input type="number" id="rateLimitKbps" class="settings-number" min="0"
                         onchange="saveDownloadSettings()">
@@ -389,8 +397,8 @@
                 <div class="toggle-row">
                     <div class="settings-label">
                         <span>Precise trim</span>
-                        <span class="settings-hint">Slower, re-encodes the cut points for a frame-accurate
-                            trim.</span>
+                        <span class="settings-hint">Only affects Trim Video. Slower, re-encodes the cut points
+                            for a frame-accurate trim.</span>
                     </div>
                     <label class="switch small">
                         <input type="checkbox" id="preciseTrimToggle" onchange="saveDownloadSettings()">
