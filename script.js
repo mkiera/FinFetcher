@@ -618,7 +618,15 @@ async function startDownload(type) {
         }
     }
 
-    // Start download request
+    // Start download request.
+    // Cancel goes up NOW, not once the response starts arriving: the backend
+    // registers the job before it returns the stream, and a streaming response
+    // does not resolve fetch() until its first event — which, for a trimmed
+    // download, is not until ffmpeg has finished. Waiting for that is what left
+    // the window with a "Downloading..." button and no way to stop it.
+    downloadInFlight = true;
+    updateCancelVisibility();
+
     try {
         const response = await fetch('/api/download', {
             method: 'POST',
@@ -640,11 +648,6 @@ async function startDownload(type) {
             const err = await response.json().catch(() => ({}));
             log("Error: " + (err.error || `HTTP ${response.status}`));
         } else {
-            // The request was accepted, so from here there is a running
-            // download for /api/download/cancel to act on
-            downloadInFlight = true;
-            updateCancelVisibility();
-
             await readEventStream(response, (msg) => {
                 if (msg.log) {
                     log(msg.log);

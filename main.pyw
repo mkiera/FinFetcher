@@ -3402,6 +3402,17 @@ def download():
             """
             completed = False
             try:
+                # Flask sends nothing until the generator yields, and fetch()
+                # does not resolve until it does. A trimmed download hands the
+                # transfer to ffmpeg, which reports nothing at all until it is
+                # finished — so without an immediate first event the page sits
+                # with no log lines and no Cancel button for the entire
+                # download, which is indistinguishable from a freeze.
+                yield f"data: {json.dumps({'log': '> [FinFetcher] Preparing download...'})}\n\n"
+                if fast_trim:
+                    # Say so, rather than leaving the silence to be interpreted.
+                    yield f"data: {json.dumps({'log': '> [FinFetcher] Trimming as it downloads — only the selected range is fetched, and ffmpeg reports no progress until it is done.'})}\n\n"
+
                 for chunk in download_stream():
                     yield chunk
                 completed = True
