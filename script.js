@@ -1157,6 +1157,12 @@ async function startUpdate() {
     const status = document.getElementById('updateStatus');
     modal.classList.remove('hidden');
 
+    // A failed attempt leaves the status red and the bar full, so clear both
+    // before the first progress event lands or the retry looks pre-broken
+    status.style.color = '';
+    status.textContent = 'Preparing update...';
+    progressFill.style.width = '0%';
+
     const asset = pendingUpdate.exe_asset;
     const params = new URLSearchParams({ url: asset.url, name: asset.name });
 
@@ -1199,10 +1205,12 @@ async function startUpdate() {
             return;
         }
 
-        status.textContent = 'Installing update... 🦭';
+        status.textContent = 'Starting the installer... 🦭';
         progressFill.style.width = '100%';
 
-        // Apply the update (app will exit and relaunch)
+        // The backend launches the installer and then exits, so from here on the
+        // window simply disappears and setup runs on its own. Whether the app is
+        // relaunched afterwards is the installer's call, so nothing below promises it.
         const applyResponse = await fetch('/api/update/apply', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1211,9 +1219,18 @@ async function startUpdate() {
         const applyData = await applyResponse.json();
 
         if (applyData.success) {
-            status.textContent = 'Restarting with new version...';
+            status.textContent = 'FinFetcher will close while the installer runs. 🦭';
+
+            // The app exits about a second after that reply and takes this page
+            // with it, so this timer can only fire when the hand-off quietly
+            // failed. Say so rather than leave the modal sitting here forever.
+            setTimeout(() => {
+                if (!modal.classList.contains('hidden')) {
+                    showFailure('The installer did not start — install the update from GitHub instead.');
+                }
+            }, 30000);
         } else {
-            showFailure('Failed to apply update: ' + (applyData.error || 'Unknown error'));
+            showFailure('Could not start the installer: ' + (applyData.error || 'Unknown error'));
         }
     } catch (e) {
         showFailure('Update error: ' + e.message);
@@ -1476,7 +1493,7 @@ async function saveDownloadSettings() {
 // Escape and a backdrop click close any dismissible modal. Without these the
 // only way out of the settings panel is its ✕, which scrolls off the top on a
 // long section. The update modal is deliberately excluded: the app is exiting
-// to swap its own exe behind it, so there is nothing to go back to.
+// to hand over to the installer, so there is nothing to go back to.
 const DISMISSIBLE_MODALS = ['playlistModal', 'streamModal', 'debugPanel', 'settingsModal'];
 
 function dismissModal(id) {

@@ -9,6 +9,11 @@ build/
 dist/
 *.spec
 
+# Inno Setup output (installer.iss writes FinFetcher-Setup.exe here) and the
+# scratch file "build exe.bat" uses to hand the numeric version to it
+dist_installer/
+build_vernum.tmp
+
 # FFmpeg binaries (download separately for builds)
 ffmpeg/
 version_info.txt

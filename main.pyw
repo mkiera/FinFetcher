@@ -281,6 +281,24 @@ class UpdateManager:
         self._config_file = os.path.join(FFmpegManager.get_app_data_dir(), 'config.json')
         self._config = self._load_config()
         self.last_download_error = None
+        self._remove_legacy_updater()
+
+    @staticmethod
+    def _remove_legacy_updater():
+        """Clear away the exe-swapping batch script builds up to 1.2.4 used.
+
+        That script deleted itself on its last line, so one only survives an
+        update that was interrupted part way through. Nothing generates or
+        runs it any more, and a stale copy sitting in AppData is one more
+        thing for a future reader to wonder about. Best effort: if cmd.exe
+        still has it open the delete fails, and it will go on the next start.
+        """
+        try:
+            legacy_bat = os.path.join(FFmpegManager.get_app_data_dir(), 'update.bat')
+            if os.path.isfile(legacy_bat):
+                os.remove(legacy_bat)
+        except Exception:
+            pass
 
     def _load_config(self):
         """Load update-related config from the shared config file."""
@@ -367,6 +385,60 @@ class UpdateManager:
         # over a pre-release of the same version — 1.2.2 updates 1.2.2b-foo.
         return remote[:4] > local[:4]
 
+    @staticmethod
+    def _is_installer_name(name):
+        """True when an asset is the Inno Setup installer, not a bare app exe.
+
+        From 1.2.5 the app ships as a directory of files installed by
+        FinFetcher-Setup.exe, so the installer is the only thing that knows
+        where the app lives and how to replace all of it. Releases up to 1.2.4
+        shipped a single self-contained FinFetcher.exe, which running would
+        merely start an unpacked copy of that old version out of the updates
+        folder. The name is the signal because it is the one we control: the
+        release asset and the CI artifact are both FinFetcher-Setup.exe.
+        """
+        base = os.path.basename(name or '').lower()
+        return base.endswith('.exe') and 'setup' in base
+
+    @staticmethod
+    def _pick_exe_asset(assets):
+        """Choose which .exe asset of a release to offer.
+
+        Prefer the installer when a release carries more than one .exe, but
+        still fall back to the first one so an older, bare-exe release stays
+        visible in the list. apply_update is what refuses to run it, with an
+        explanation the user can act on — silently hiding those releases would
+        take away the only route back off a bad version.
+        """
+        exe_assets = [a for a in assets
+                      if str(a.get('name', '')).lower().endswith('.exe')]
+        if not exe_assets:
+            return None
+        for asset in exe_assets:
+            if UpdateManager._is_installer_name(asset['name']):
+                return asset
+        return exe_assets[0]
+
+    @staticmethod
+    def get_updates_dir():
+        """The one directory an update may be downloaded to and run from."""
+        return os.path.join(FFmpegManager.get_app_data_dir(), 'updates')
+
+    @staticmethod
+    def is_inside_updates_dir(path):
+        """True when path really resolves to somewhere inside the updates dir.
+
+        Guards the only place this app runs a file it fetched off the network,
+        so it resolves symlinks and junctions before comparing rather than
+        trusting the string it was handed.
+        """
+        updates_dir = os.path.realpath(UpdateManager.get_updates_dir())
+        try:
+            return os.path.commonpath(
+                [os.path.realpath(path), updates_dir]) == updates_dir
+        except (ValueError, OSError, TypeError):  # different drives, or not a path
+            return False
+
     def _should_auto_check(self):
         """Check if enough time has passed since the last automatic check."""
         last_check = self._config.get('last_update_check')
@@ -450,12 +522,7 @@ class UpdateManager:
                 version = tag.lstrip('v')
                 if self._is_newer(version, current_version):
                     if best is None or self._is_newer(version, best['version']):
-                        # Find the .exe asset
-                        exe_asset = None
-                        for asset in release.get('assets', []):
-                            if asset['name'].endswith('.exe'):
-                                exe_asset = asset
-                                break
+                        exe_asset = self._pick_exe_asset(release.get('assets', []))
 
                         best = {
                             'version': version,
@@ -467,6 +534,9 @@ class UpdateManager:
                                 'name': exe_asset['name'],
                                 'url': exe_asset['browser_download_url'],
                                 'size': exe_asset['size'],
+                                # False means self-update will refuse it — see
+                                # _is_installer_name.
+                                'is_installer': self._is_installer_name(exe_asset['name']),
                             } if exe_asset else None,
                         }
 
@@ -488,14 +558,14 @@ class UpdateManager:
     def download_update(self, asset_url, asset_name, progress_callback=None):
         """Download an update asset to a temp directory.
 
-        If the downloaded file is a zip, extracts the first .exe from it.
+        If the downloaded file is a zip, extracts the installer from it.
         Returns the path to the downloaded/extracted exe, or None on failure.
         On failure the reason is left in self.last_download_error so the
         caller can show it instead of a bare "Download failed".
         """
         self.last_download_error = None
         try:
-            download_dir = os.path.join(FFmpegManager.get_app_data_dir(), 'updates')
+            download_dir = self.get_updates_dir()
             os.makedirs(download_dir, exist_ok=True)
             # Never let the asset name steer the write outside the updates dir
             dest_path = os.path.join(download_dir, os.path.basename(asset_name))
@@ -532,8 +602,13 @@ class UpdateManager:
                         if progress_callback:
                             progress_callback(0, self.last_download_error)
                         return None
-                    zf.extract(exe_files[0], download_dir)
-                    extracted_path = os.path.join(download_dir, exe_files[0])
+                    # A onedir build zips up as a whole tree of exes (the app,
+                    # plus whatever ships beside it), so "the first one" is no
+                    # longer good enough — take the installer when it is there.
+                    wanted = next((n for n in exe_files
+                                   if self._is_installer_name(n)), exe_files[0])
+                    zf.extract(wanted, download_dir)
+                    extracted_path = os.path.join(download_dir, wanted)
                 # Clean up the zip
                 os.remove(dest_path)
                 return extracted_path
@@ -554,104 +629,123 @@ class UpdateManager:
                 progress_callback(0, f"Download failed: {self.last_download_error}")
             return None
 
-    def apply_update(self, downloaded_exe_path):
-        """Launch an updater script and exit the app.
+    # Switches handed to the Inno Setup installer for an unattended update.
+    # Semantics are from the Inno Setup help, "Setup Command Line Parameters":
+    #   /SILENT   hides the wizard but still shows the progress window, so the
+    #             user sees the update happening after our window disappears.
+    #             /VERYSILENT would leave a blank screen that reads as a crash.
+    #   /SP-      skips the "This will install..." prompt; message boxes are
+    #             NOT suppressed (no /SUPPRESSMSGBOXES) because once we have
+    #             exited, a message box is the only way the installer can tell
+    #             the user something went wrong.
+    #   /NOCANCEL cancelling half way through would leave a half-written app
+    #             directory and no running app to explain it.
+    #   /NORESTART never reboot the machine on our behalf.
+    #   /CLOSEAPPLICATIONS  we exit before the installer reaches the file copy,
+    #             but a second FinFetcher window, or simply losing the race,
+    #             would otherwise leave files locked. This is Setup's default
+    #             anyway; passing it means the update still works if the
+    #             installer script ever sets CloseApplications=no.
+    #   /NORESTARTAPPLICATIONS  Setup only restarts applications that called
+    #             RegisterApplicationRestart, which this app does not, so
+    #             /RESTARTAPPLICATIONS could never relaunch us — see the
+    #             RestartApplications directive in the Inno Setup help. Saying
+    #             "no" explicitly keeps the relaunch owned by exactly one
+    #             thing (the installer's own post-install launch) so a future
+    #             restart registration cannot start a second window.
+    # Deliberately NOT passed: /DIR and /TASKS. Setup's UsePreviousAppDir and
+    # UsePreviousTasks both default to yes, so leaving them off keeps the
+    # user's install location and their desktop-shortcut choice; /TASKS would
+    # reset the task selection to only what we listed.
+    INSTALLER_SWITCHES = (
+        '/SILENT',
+        '/SP-',
+        '/NOCANCEL',
+        '/NORESTART',
+        '/CLOSEAPPLICATIONS',
+        '/NORESTARTAPPLICATIONS',
+    )
 
-        Only supported for the packaged exe. When frozen (PyInstaller
-        --onefile), sys.executable is the exe itself and cannot be used as a
-        Python interpreter, so we generate a Windows batch script that waits
-        for this process to exit, swaps the exe, cleans up, and relaunches.
-        This runs completely outside the _MEI temp directory so PyInstaller
-        can clean it up.
+    # How long to watch the installer before believing it started. Setup
+    # refuses (bad file, blocked by policy, "cannot proceed") by exiting almost
+    # immediately, so a short watch catches that while it is still cheap.
+    INSTALLER_START_TIMEOUT = 1.5
 
-        Running from source there is nothing to swap — the "old exe" would be
-        main.pyw itself — so callers must refuse before getting here.
+    def apply_update(self, installer_path):
+        """Run a downloaded installer so it can replace this installation.
 
-        Returns True if the updater was launched successfully.
+        The app ships as a directory of files, so there is nothing to swap in
+        place any more: replacing FinFetcher.exe alone would leave a new
+        bootloader next to a stale _internal folder and the app would not
+        start. The installer is what knows the whole layout, so all this does
+        is start it and get out of the way; the caller exits once this returns
+        success, because the installer cannot overwrite files we still hold.
+
+        Only supported for the packaged app. Running from source there is
+        nothing to install over — the "old exe" would be main.pyw itself.
+
+        Returns (True, None) when the installer is running and the caller may
+        exit, or (False, reason) when it is not. On (False, reason) the app
+        must stay up: a user with neither the old app nor the new one has no
+        way back, so every refusal here is one the UI can show and act on.
         """
         if not getattr(sys, 'frozen', False):
-            return False
+            return False, ('Self-update is only available in the packaged app — '
+                           'please download the new version manually.')
+
+        # Only ever run something we downloaded ourselves, into our own folder
+        if not self.is_inside_updates_dir(installer_path):
+            return False, 'Update file is outside the updates folder'
+
+        if not os.path.isfile(installer_path):
+            return False, 'Downloaded file not found'
+
+        if not self._is_installer_name(installer_path):
+            # A bare exe from v1.2.4 or earlier: running it would start that
+            # old version out of the updates folder and change nothing about
+            # the installed copy, which looks exactly like a successful update
+            # until the next restart. Refuse and say what to do instead.
+            return False, (
+                f'{os.path.basename(installer_path)} is not the FinFetcher installer. '
+                'Builds up to 1.2.4 shipped as a single stand-alone exe, which cannot '
+                'replace an installed copy — to go back to one, uninstall FinFetcher '
+                'from Windows Settings first, then run that download yourself. It is '
+                f'kept at {installer_path}.')
+
+        log_path = os.path.join(FFmpegManager.get_app_data_dir(), 'update.log')
+
+        creationflags = 0
+        if os.name == 'nt':
+            # Outlive our own exit, and take no console window with it
+            creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
 
         try:
-            pid = os.getpid()
-            current_exe = sys.executable
-            # Generate a batch script in AppData (outside _MEI)
-            bat_path = os.path.join(FFmpegManager.get_app_data_dir(), 'update.bat')
-            updates_dir = os.path.join(FFmpegManager.get_app_data_dir(), 'updates')
-            log_path = os.path.join(FFmpegManager.get_app_data_dir(), 'update.log')
-
-            # chcp 65001 + a UTF-8 file keeps non-ASCII paths (e.g. C:\Users\José)
-            # intact — cmd.exe otherwise reads the script in the OEM codepage.
-            bat_content = f'''@echo off
-chcp 65001 >NUL
-setlocal
-
-set LOGFILE="{log_path}"
-echo [%DATE% %TIME%] Update started >> %LOGFILE%
-
-REM Wait for the main app to exit
-:wait_loop
-tasklist /FI "PID eq {pid}" 2>NUL | find /I "{pid}" >NUL
-if not errorlevel 1 (
-    timeout /t 1 /nobreak >NUL
-    goto wait_loop
-)
-echo [%DATE% %TIME%] App exited >> %LOGFILE%
-
-REM Grace period for file handles to release
-timeout /t 2 /nobreak >NUL
-
-REM Bail out before touching anything if the update went missing
-if not exist "{downloaded_exe_path}" (
-    echo [%DATE% %TIME%] Update file missing - aborting >> %LOGFILE%
-    goto relaunch
-)
-
-REM Replace the old exe
-if exist "{current_exe}.bak" del /f "{current_exe}.bak"
-if exist "{current_exe}" move /y "{current_exe}" "{current_exe}.bak"
-move /y "{downloaded_exe_path}" "{current_exe}"
-if errorlevel 1 goto swap_failed
-echo [%DATE% %TIME%] Exe swapped >> %LOGFILE%
-
-REM Clean up backup and the downloaded update
-del /f "{current_exe}.bak" 2>NUL
-if exist "{updates_dir}" rmdir /s /q "{updates_dir}" 2>NUL
-goto relaunch
-
-:swap_failed
-REM Swap failed — put the old exe back so the app still starts
-echo [%DATE% %TIME%] Swap FAILED - restoring backup >> %LOGFILE%
-if exist "{current_exe}.bak" move /y "{current_exe}.bak" "{current_exe}"
-
-:relaunch
-REM Brief pause before relaunch
-timeout /t 1 /nobreak >NUL
-
-REM Relaunch the app (use explorer to simulate double-click)
-echo [%DATE% %TIME%] Launching >> %LOGFILE%
-explorer.exe "{current_exe}"
-
-REM Self-delete this batch script
-del /f "%~f0" 2>NUL
-'''
-            with open(bat_path, 'w', encoding='utf-8') as f:
-                f.write(bat_content)
-
-            # Launch the batch script hidden (no console window)
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = 0  # SW_HIDE
-            subprocess.Popen(
-                ['cmd.exe', '/c', bat_path],
-                startupinfo=startupinfo,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+            # cwd stays in AppData: a working directory inside the install
+            # folder would lock that folder against the very files the
+            # installer has to replace.
+            proc = subprocess.Popen(
+                [installer_path, *self.INSTALLER_SWITCHES, f'/LOG={log_path}'],
+                cwd=FFmpegManager.get_app_data_dir(),
+                creationflags=creationflags,
+                close_fds=True,
             )
+        except Exception as e:
+            # Missing file, blocked by AV or policy, not an executable at all —
+            # whatever it was, this app is still running and has to say so.
+            return False, f'Could not start the installer: {e}'
 
-            return True
+        try:
+            code = proc.wait(timeout=self.INSTALLER_START_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            code = None  # still running, which is the normal case
+        if code not in (None, 0):
+            # Documented Setup exit codes: 1 failed to initialise, 2 cancelled
+            # before installing, 3/4 fatal error, 5 cancelled during install,
+            # 7/8 "cannot proceed".
+            return False, (f'The installer stopped straight away (exit code {code}). '
+                           f'Details are in {log_path}.')
 
-        except Exception:
-            return False
+        return True, None
 
 
 # Global UpdateManager instance
@@ -1105,41 +1199,29 @@ def update_download():
 
 @app.route('/api/update/apply', methods=['POST'])
 def update_apply():
-    """Apply a downloaded update (launches helper, then exits)."""
-    data = request.json
+    """Run a downloaded installer, then exit so it can replace this app."""
+    data = request.get_json(silent=True) or {}
     downloaded_path = data.get('path')
 
-    if not getattr(sys, 'frozen', False):
-        return jsonify({
-            'success': False,
-            'error': 'Self-update is only available in the packaged exe — '
-                     'please download the new version manually.',
-        })
-
-    if not downloaded_path or not os.path.exists(downloaded_path):
+    if not downloaded_path or not isinstance(downloaded_path, str):
         return jsonify({'success': False, 'error': 'Downloaded file not found'})
 
-    # Only ever swap in something we downloaded ourselves
-    updates_dir = os.path.realpath(os.path.join(FFmpegManager.get_app_data_dir(), 'updates'))
-    try:
-        in_updates_dir = os.path.commonpath(
-            [os.path.realpath(downloaded_path), updates_dir]) == updates_dir
-    except ValueError:  # different drives
-        in_updates_dir = False
-    if not in_updates_dir:
-        return jsonify({'success': False, 'error': 'Update file is outside the updates folder'})
+    # Every guard — frozen, inside the updates folder, actually the installer —
+    # lives in apply_update, next to the line that runs the file.
+    started, error = update_manager.apply_update(downloaded_path)
 
-    success = update_manager.apply_update(downloaded_path)
+    if not started:
+        # Nothing was launched, so this app is still the only one there is.
+        # Report why and stay running rather than exiting into nothing.
+        return jsonify({'success': False, 'error': error or 'Failed to start the installer'})
 
-    if success:
-        # Schedule app exit after responding
-        def shutdown():
-            time.sleep(1)
-            os._exit(0)
-        threading.Thread(target=shutdown, daemon=True).start()
-        return jsonify({'success': True})
-    else:
-        return jsonify({'success': False, 'error': 'Failed to launch updater'})
+    # The installer cannot overwrite files this process still has open, so
+    # step aside — but only after the answer above has reached the page.
+    def shutdown():
+        time.sleep(1)
+        os._exit(0)
+    threading.Thread(target=shutdown, daemon=True).start()
+    return jsonify({'success': True})
 
 
 @app.route('/api/update/settings', methods=['GET', 'POST'])
@@ -1191,16 +1273,16 @@ def update_releases():
 
             version = tag.lstrip('v')
 
-            # Find exe asset
-            exe_asset = None
-            for asset in release.get('assets', []):
-                if asset['name'].endswith('.exe'):
-                    exe_asset = {
-                        'name': asset['name'],
-                        'url': asset['browser_download_url'],
-                        'size': asset['size'],
-                    }
-                    break
+            # Find the asset to offer — the installer when there is one
+            picked = update_manager._pick_exe_asset(release.get('assets', []))
+            exe_asset = {
+                'name': picked['name'],
+                'url': picked['browser_download_url'],
+                'size': picked['size'],
+                # False means self-update will refuse it: a bare exe from
+                # 1.2.4 or earlier cannot replace an installed copy.
+                'is_installer': update_manager._is_installer_name(picked['name']),
+            } if picked else None
 
             result.append({
                 'version': version,

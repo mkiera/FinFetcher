@@ -15,16 +15,16 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -35,7 +35,7 @@ jobs:
 
       - name: Verify certifi is present for bundling
         run: python -c "import certifi, os; p = certifi.where(); assert os.path.exists(p), p; print('certifi OK:', p)"
-      
+
       - name: Get build name
         id: build_name
         shell: bash
@@ -48,19 +48,70 @@ jobs:
             BRANCH_NAME=${BRANCH_NAME#bugfix/}
             echo "NAME=${BRANCH_NAME}" >> $GITHUB_OUTPUT
           fi
-      
+
       - name: Generate version resource
         run: python make_version_info.py version_info.txt
 
       # Kept identical to the release build, so a test artifact is scored the
-      # same way by antivirus as the thing that eventually ships.
-      - name: Build EXE
+      # same way by antivirus as the thing that eventually ships. --onedir puts
+      # the exe in dist\FinFetcher\ and everything else in _internal\, which is
+      # where sys._MEIPASS points at run time, so the --add-data files still land
+      # where main.pyw looks for them.
+      - name: Build app folder
         run: |
-          python -m PyInstaller --onefile --windowed --noupx --version-file version_info.txt --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
-      
+          python -m PyInstaller --onedir --windowed --noupx --version-file version_info.txt --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
+
+      # A Windows version resource needs four plain numbers, and version.txt can
+      # say something like 1.2.4f-media-options. Reuse the app's own rule for
+      # that instead of writing a second one into installer.iss.
+      - name: Derive numeric version for the installer
+        id: vernum
+        shell: bash
+        run: |
+          VERNUM=$(python -c "import make_version_info as m; print('.'.join(str(n) for n in m.numeric_version(open('version.txt', encoding='utf-8').read())))")
+          echo "VERNUM=$VERNUM" >> $GITHUB_OUTPUT
+          echo "numeric version: $VERNUM"
+
+      # windows-latest is expected to ship Inno Setup, but "expected to" is not a
+      # build guarantee — install it rather than fail. The resolved path is
+      # exported instead of relying on PATH, because a fresh choco shim is not
+      # visible to a step that already started.
+      - name: Ensure Inno Setup is available
+        shell: pwsh
+        run: |
+          function Find-Iscc {
+            $onPath = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
+            if ($onPath) { return $onPath }
+            # Version-agnostic glob: choco installs into "Inno Setup 6" today and
+            # a later major would be "Inno Setup 7".
+            # winget installs Inno Setup per-user into %LOCALAPPDATA%\Programs,
+            # which is not Program Files - a dev machine hits that path.
+            $globs = @("${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup *\ISCC.exe")
+            return (Get-ChildItem -Path $globs -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
+            Write-Host "Inno Setup not found on this runner - installing it."
+            choco install innosetup -y --no-progress
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) { throw "ISCC.exe still not found after installing Inno Setup" }
+          Write-Host "Using $iscc"
+          Add-Content -Path $env:GITHUB_ENV -Value "ISCC=$iscc"
+
+      # Packages dist\FinFetcher\ whole into dist_installer\FinFetcher-Setup.exe.
+      # AppVersion is left for the script to read out of version.txt.
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "$env:ISCC" "/DVersionNumeric=${{ steps.vernum.outputs.VERNUM }}" installer.iss
+
+      # The installer, not the app folder: it is what a tester should run, and
+      # the updater's "is this the installer?" check keys off the exe being named
+      # FinFetcher-Setup.exe inside the artifact zip.
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: FinFetcher_${{ steps.build_name.outputs.NAME }}
-          path: dist/FinFetcher.exe
+          path: dist_installer/FinFetcher-Setup.exe
           retention-days: 30
