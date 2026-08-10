@@ -6,6 +6,7 @@ Built with Flask + PyWebView for native desktop experience.
 
 
 import os
+import re
 import sys
 import json
 import ssl
@@ -1082,9 +1083,22 @@ class AppSettings:
         # entry fetched as audio counts as "done" for a later video run.
         # Opting in has to be a deliberate choice.
         'use_download_archive': False,
+        # On by default: fetching only the requested range is the whole point
+        # of a trim. Turning it off downloads the video in full and cuts it
+        # afterwards, which is slower but goes through yt-dlp's own downloader
+        # rather than handing the media URL to ffmpeg — the way out when a
+        # source refuses ffmpeg's direct fetch.
+        'fast_trim': True,
         # On by default so trimming stays frame-accurate, as it was before
-        # range downloads. Turning it off snaps cuts to the nearest keyframe
-        # (faster, no re-encode at the boundaries).
+        # range downloads. Turning it off snaps cuts to the nearest keyframe.
+        #
+        # This is the expensive setting, not fast_trim. It maps to
+        # force_keyframes_at_cuts, and FFmpegFD drops "-c copy" whenever that
+        # is set with a range (yt_dlp/downloader/external.py:589-590), so the
+        # slice is re-encoded rather than copied. Measured on 24s of 360p:
+        # 0.2s copied, 1.0s re-encoded to mp4 (libx264), 18.4s re-encoded to
+        # webm (libvpx-vp9). The container multiplies it, which is why a webm
+        # trim feels broken and the same trim to mp4 does not.
         'precise_trim': True,
         # Sits in the same settings panel as everything else here, so it has to
         # survive a restart like everything else here. The download request still
@@ -2416,16 +2430,83 @@ def _register_thumbnail_guard():
 THUMBNAIL_GUARD_KEY = _register_thumbnail_guard()
 
 
+def _averror_tag(a, b, c, d):
+    """One of ffmpeg's FFERRTAG error constants, as ffmpeg's own headers build it."""
+    first = a if isinstance(a, int) else ord(a)
+    return -(first | (ord(b) << 8) | (ord(c) << 16) | (ord(d) << 24))
+
+
+# ffmpeg exits with a negative AVERROR, and Windows reports a process exit code
+# as unsigned — so a plain HTTP 403 surfaces as "exited with code 3436169992".
+# That number is what the user is left holding when a trimmed download fails,
+# and it says nothing. Mapped back to the code ffmpeg meant by it.
+FFMPEG_EXIT_CODES = {
+    _averror_tag(0xF8, '4', '0', '0') & 0xFFFFFFFF: 'the server rejected the request (HTTP 400)',
+    _averror_tag(0xF8, '4', '0', '1') & 0xFFFFFFFF: 'the server wanted authentication (HTTP 401)',
+    _averror_tag(0xF8, '4', '0', '3') & 0xFFFFFFFF: 'the server refused it (HTTP 403)',
+    _averror_tag(0xF8, '4', '0', '4') & 0xFFFFFFFF: 'the media was not there (HTTP 404)',
+    _averror_tag(0xF8, '4', '2', '9') & 0xFFFFFFFF: 'the server is rate-limiting us (HTTP 429)',
+    _averror_tag(0xF8, '4', 'X', 'X') & 0xFFFFFFFF: 'the server rejected the request (HTTP 4xx)',
+    _averror_tag(0xF8, '5', 'X', 'X') & 0xFFFFFFFF: 'the server had an error (HTTP 5xx)',
+    _averror_tag('I', 'N', 'D', 'A') & 0xFFFFFFFF: 'the data was not valid media',
+    _averror_tag(0xF8, 'P', 'R', 'O') & 0xFFFFFFFF: 'the URL used a protocol ffmpeg does not have',
+    _averror_tag('E', 'O', 'F', ' ') & 0xFFFFFFFF: 'the stream ended early',
+    (-22) & 0xFFFFFFFF: 'the arguments or codecs were not valid for this container',
+    (-2) & 0xFFFFFFFF: 'a file it needed was missing',
+    (-13) & 0xFFFFFFFF: 'it was denied access to a file',
+}
+
+_FFMPEG_EXIT_RE = re.compile(r'(ffmpeg exited with code )(\d{4,})')
+
+
+def describe_ffmpeg_failure(message):
+    """Rewrite ffmpeg's raw exit code in a message into what it actually means.
+
+    Left alone when the code is not one we know: inventing a cause would be
+    worse than the number, which is at least searchable.
+    """
+    if not message:
+        return message
+
+    def replace(match):
+        known = FFMPEG_EXIT_CODES.get(int(match.group(2)))
+        return match.group(0) if known is None else f'{match.group(0)} — {known}'
+
+    return _FFMPEG_EXIT_RE.sub(replace, message)
+
+
+# The AVERROR codes that mean "ffmpeg could not fetch the media", as opposed to
+# "ffmpeg could not process it". Only the fetch failures are worth retrying by
+# another route — a container or codec complaint would fail again identically.
+FFMPEG_FETCH_FAILURE_CODES = frozenset(
+    code & 0xFFFFFFFF for code in (
+        _averror_tag(0xF8, '4', '0', '0'), _averror_tag(0xF8, '4', '0', '1'),
+        _averror_tag(0xF8, '4', '0', '3'), _averror_tag(0xF8, '4', '0', '4'),
+        _averror_tag(0xF8, '4', '2', '9'), _averror_tag(0xF8, '4', 'X', 'X'),
+        _averror_tag(0xF8, '5', 'X', 'X'), _averror_tag('E', 'O', 'F', ' '),
+    ))
+
+
 def _is_partial_download_refusal(error_payload):
     """True when a failed attempt failed *because* a range was requested.
 
-    yt-dlp's two refusals are worded in YoutubeDL.py:3442-3443. Anything else
-    (403, geo-block, dropped connection) is a real error and must not be
-    retried as a full download.
+    Two ways that happens. yt-dlp can refuse up front, worded in
+    YoutubeDL.py:3442-3443. Or it hands the media URL to ffmpeg — which is how
+    a ranged download is fetched at all — and the server refuses ffmpeg where
+    it would have served yt-dlp's own downloader perfectly well. A 403 there is
+    not the flat "this video is blocked" a 403 would mean during a normal
+    download, so unlike the other errors here it is worth another attempt by
+    the other route.
+
+    Anything else (a geo-block, a dropped connection, a bad container) is a
+    real error and must not be retried as a full download.
     """
     message = (error_payload or {}).get('error') or ''
-    return ('cannot be partially downloaded' in message
-            or 'partially, but ffmpeg is not installed' in message)
+    if ('cannot be partially downloaded' in message
+            or 'partially, but ffmpeg is not installed' in message):
+        return True
+    match = _FFMPEG_EXIT_RE.search(message)
+    return bool(match and int(match.group(2)) in FFMPEG_FETCH_FAILURE_CODES)
 
 
 def apply_media_opts(ydl_opts, settings, mode, save_path, fast_trim=False):
@@ -2592,6 +2673,43 @@ def _scrap_name_roots(path, folder):
     return name, os.path.splitext(name)[0]
 
 
+# Small enough that no real download lands under it — a second of 128kbps
+# audio is already four times this — and large enough to cover a bare container
+# header, which is all ffmpeg writes when it never manages to read the source.
+MIN_USABLE_OUTPUT_BYTES = 4096
+
+
+def _has_usable_output(path):
+    """True when a reported download is actually a file with media in it.
+
+    Only asks whether anything was written. Deliberately not an ffprobe call:
+    this runs on the happy path of every trimmed download, and a missing or
+    slow probe must not be able to fail one.
+    """
+    try:
+        return os.path.getsize(path) >= MIN_USABLE_OUTPUT_BYTES
+    except OSError:
+        return False
+
+
+def _wrote_only_empty_files(seen_files):
+    """True when this run created files but none of them hold any media.
+
+    The signature of an ffmpeg that could not read its source: it writes the
+    container header, exits 0, and leaves a few hundred bytes behind. Whatever
+    fails next — post-processing, a merge — reports something about that file
+    rather than about the fetch that never happened.
+
+    Requires at least one file to exist, which is what keeps this apart from a
+    failure that never got as far as writing anything (a geo-block, a bad URL).
+    Those must not be retried as a full download: the retry would fail
+    identically, having downloaded nothing, and cost the user the wait.
+    """
+    existing = [path for path in seen_files
+                if isinstance(path, str) and path and os.path.isfile(path)]
+    return bool(existing) and not any(_has_usable_output(p) for p in existing)
+
+
 def _remove_file_with_retry(path, attempts=4, delay=0.5):
     """Delete a file a just-stopped ffmpeg may still be holding open.
 
@@ -2653,6 +2771,13 @@ def _terminate_process(proc):
 #   orig            the pre-conversion audio ExtractAudio sets aside when the
 #                   output keeps the same name (ffmpeg.py:515-516)
 POSTPROCESSOR_SCRAP_MARKERS = ('temp', 'keyframes.temp', 'uncut', 'orig')
+
+# A cover image is only ever fetched to be embedded (writethumbnail is set
+# nowhere else — see apply_media_opts), and EmbedThumbnail deletes it once it
+# has. One still sitting next to the video means the run died before that, so
+# it is a scrap and not a file the user asked for. yt-dlp writes whatever the
+# site serves, which for YouTube is .webp.
+THUMBNAIL_SCRAP_EXTS = ('.webp', '.jpg', '.jpeg', '.png')
 
 
 def _cleanup_download_scraps(save_path, seen_files, cancelled=False, since=None):
@@ -2727,10 +2852,15 @@ def _cleanup_download_scraps(save_path, seen_files, cancelled=False, since=None)
             if not cancelled:
                 continue
         else:
+            entry_stem, entry_ext = os.path.splitext(entry)
             is_scrap = (any(entry.startswith(f'{name}.part') for name in names)
                         or any(entry.startswith(f'{stem}.{marker}.')
                                for stem in stems
-                               for marker in POSTPROCESSOR_SCRAP_MARKERS))
+                               for marker in POSTPROCESSOR_SCRAP_MARKERS)
+                        # An un-embedded cover image, named after the video it
+                        # was fetched for
+                        or (entry_ext.lower() in THUMBNAIL_SCRAP_EXTS
+                            and entry_stem in stems))
             if not is_scrap:
                 continue
 
@@ -3006,8 +3136,12 @@ def download():
     trim_range_ok = (start_sec is not None and end_sec is not None
                      and end_sec > start_sec)
     # Playlists are excluded because there is no single file to cut; a stale
-    # checkbox used to re-encode whichever entry finished last.
-    fast_trim = trim_requested and trim_range_ok and download_type == 'single'
+    # checkbox used to re-encode whichever entry finished last. The setting is
+    # the user's own escape hatch: off means download in full and cut with
+    # ffmpeg afterwards, which is the only route when a source will not serve
+    # ffmpeg the media URL directly.
+    fast_trim = (settings['fast_trim'] and trim_requested
+                 and trim_range_ok and download_type == 'single')
 
     if fast_trim:
         # Ask the extractor for just the requested range instead of pulling
@@ -3143,7 +3277,11 @@ def download():
             if job.is_cancelled() or isinstance(e, DownloadCancelled):
                 result_queue.put({'success': False, 'cancelled': True})
             else:
-                result_queue.put({'success': False, 'error': str(e)})
+                # Enriched here rather than at the yield, so the message the
+                # user reads and the message _is_partial_download_refusal
+                # matches on are the same string
+                result_queue.put({'success': False,
+                                  'error': describe_ffmpeg_failure(str(e))})
 
     # The threads the attempts run on. The download thread is a daemon and
     # keeps going if the stream is dropped, so the cleanup path needs a way to
@@ -3278,20 +3416,47 @@ def download():
             final_file, download_success, error_payload = yield from run_attempt(ydl_opts)
 
             if fast_trim:
-                if download_success and final_file:
+                if download_success and final_file and _has_usable_output(final_file):
                     trimmed_on_download = True
                     cut = 'exact cut' if settings['precise_trim'] else 'cut at the nearest keyframes'
                     yield f"data: {json.dumps({'log': f'> [FinFetcher] Fast trim: downloaded only {trim_start} to {trim_end} ({cut}).'})}\n\n"
-                elif _is_partial_download_refusal(error_payload):
-                    # This source cannot serve a range, so fetch the whole
-                    # thing and hand the cut to ffmpeg below. Only for this
-                    # specific refusal — retrying a 403 or a dropped
-                    # connection would re-download the video for nothing and
-                    # blame the wrong thing while doing it.
-                    yield f"data: {json.dumps({'log': '> [FinFetcher] Fast trim unavailable for this source — downloading in full and trimming with ffmpeg.'})}\n\n"
-                    ydl_opts.pop('download_ranges', None)
-                    ydl_opts.pop('force_keyframes_at_cuts', None)
-                    final_file, download_success, error_payload = yield from run_attempt(ydl_opts)
+                else:
+                    # Three ways the fast path fails, all answered the same
+                    # way — fetch the whole thing through yt-dlp's own
+                    # downloader and hand the cut to the ffmpeg trim below.
+                    #
+                    # Deliberately narrow. A geo-block or a dropped connection
+                    # must not land here: the retry would fail identically
+                    # after re-downloading the video, and blame the wrong thing
+                    # while doing it.
+                    if _wrote_only_empty_files(seen_files):
+                        # ffmpeg can fail to read its source and still exit 0,
+                        # having written only a container header — seen against
+                        # a server that would not serve it a range: "Stream
+                        # ends prematurely", "Output file is empty, nothing was
+                        # encoded", exit code 0. yt-dlp believes the exit code,
+                        # so the empty file goes on to post-processing, and
+                        # what the user is shown is a complaint about the
+                        # output file describing nothing they did.
+                        why = 'it produced an empty file — the source would not serve the range to ffmpeg'
+                    elif _is_partial_download_refusal(error_payload):
+                        # Either the source cannot serve a range at all, or it
+                        # served ffmpeg a refusal it would not have served
+                        # yt-dlp's own downloader.
+                        why = error_payload.get('error') or 'no reason given'
+                    else:
+                        why = None
+
+                    if why is not None:
+                        yield f"data: {json.dumps({'log': '> [FinFetcher] Fast trim did not work for this source: ' + why})}\n\n"
+                        yield f"data: {json.dumps({'log': '> [FinFetcher] Downloading in full and trimming with ffmpeg instead — this takes longer.'})}\n\n"
+                        # The scrap has the name the real download wants
+                        for path in list(seen_files):
+                            if isinstance(path, str) and os.path.isfile(path):
+                                _remove_file_with_retry(path)
+                        ydl_opts.pop('download_ranges', None)
+                        ydl_opts.pop('force_keyframes_at_cuts', None)
+                        final_file, download_success, error_payload = yield from run_attempt(ydl_opts)
 
             if error_payload:
                 yield f"data: {json.dumps(error_payload)}\n\n"
@@ -3458,12 +3623,15 @@ def download():
                                                     since=run_started):
                 yield f"data: {json.dumps({'log': message})}\n\n"
 
-            # Send final status
+            # Send final status. Every run ends with exactly one of these, so
+            # "did this download fail?" is answerable from the stream itself
+            # rather than by scanning the log for an error line — which is what
+            # the debug panel needs, and what a bare {'error': ...} could not
+            # give it.
             if download_success:
                 yield f"data: {json.dumps({'status': 'completed'})}\n\n"
             else:
-                 # Error already sent above
-                 pass
+                yield f"data: {json.dumps({'status': 'error'})}\n\n"
 
         def generate():
             """Stream the download, cleaning up after it however it ends.
@@ -3487,6 +3655,19 @@ def download():
                 if fast_trim:
                     # Say so, rather than leaving the silence to be interpreted.
                     yield f"data: {json.dumps({'log': '> [FinFetcher] Trimming as it downloads — only the selected range is fetched, and ffmpeg reports no progress until it is done.'})}\n\n"
+                    if settings['precise_trim']:
+                        # The single biggest cost in the whole run, and it is
+                        # invisible: FFmpegFD drops "-c copy" for a precise
+                        # cut, so the clip is re-encoded. Naming the container
+                        # matters because vp9 is an order of magnitude slower
+                        # than h264 at it, which is the difference between a
+                        # trim that feels instant and one that looks frozen.
+                        codec_note = ('re-encoding to webm (VP9), which is slow — around 19x mp4 '
+                                      'in testing' if settings['container'] == 'webm'
+                                      else f"re-encoding to {settings['container']}")
+                        yield f"data: {json.dumps({'log': '> [FinFetcher] Precise trim is on, so it is ' + codec_note + '. Turn Precise trim off in Settings for a near-instant copy that cuts at the nearest keyframe.'})}\n\n"
+                elif trim_requested and trim_range_ok and download_type == 'single':
+                    yield f"data: {json.dumps({'log': '> [FinFetcher] Fast trim is off — downloading in full first, then cutting with ffmpeg.'})}\n\n"
 
                 for chunk in download_stream():
                     yield chunk

@@ -395,9 +395,25 @@
 
                 <div class="toggle-row">
                     <div class="settings-label">
+                        <span>Fast trim</span>
+                        <span class="settings-hint">Only affects Trim Video. Fetches just the selected range
+                            instead of the whole video. Turn off to download in full and cut afterwards —
+                            slower, but it works on sources that refuse the direct fetch.</span>
+                    </div>
+                    <label class="switch small">
+                        <input type="checkbox" id="fastTrimToggle" onchange="saveDownloadSettings()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="toggle-row">
+                    <div class="settings-label">
                         <span>Precise trim</span>
-                        <span class="settings-hint">Only affects Trim Video. Slower, re-encodes the cut points
-                            for a frame-accurate trim.</span>
+                        <span class="settings-hint">Only affects Trim Video. Cuts exactly on the timestamps by
+                            re-encoding the clip; off snaps to the nearest keyframe and just copies it.
+                            This is the slow one — re-encoding to <strong>webm</strong> took roughly 19&times;
+                            as long as mp4 in testing, so leave it off for webm unless you need the exact
+                            frame.</span>
                     </div>
                     <label class="switch small">
                         <input type="checkbox" id="preciseTrimToggle" onchange="saveDownloadSettings()">

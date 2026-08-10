@@ -646,7 +646,9 @@ async function startDownload(type) {
         if (!response.ok) {
             // The backend rejected the request outright — that's JSON, not a stream
             const err = await response.json().catch(() => ({}));
-            log("Error: " + (err.error || `HTTP ${response.status}`));
+            const reason = err.error || `HTTP ${response.status}`;
+            log("Error: " + reason);
+            recordError(reason);
         } else {
             await readEventStream(response, (msg) => {
                 if (msg.log) {
@@ -661,13 +663,25 @@ async function startDownload(type) {
                 if (msg.status === 'cancelled') {
                     log("Download cancelled.");
                 }
+                // The reason came through as msg.error just before this; this
+                // is only the marker that the run is over and it failed
+                if (msg.status === 'error') {
+                    log("Download failed.");
+                }
+                // The download's own failures are the ones worth keeping for
+                // the debug panel — an ffmpeg exit code or a refused fetch
+                // reaches the user here and nowhere else, and until this was
+                // recorded "Last Error" still read "No errors recorded"
+                // while the log plainly showed one.
                 if (msg.error) {
                     log("Error: " + msg.error);
+                    recordError(msg.error);
                 }
             });
         }
     } catch (e) {
         log("Network Error: " + e.message);
+        recordError(`Network error during download: ${e.message}`);
     }
 
     // Always re-enable the UI once the stream is over, however it ended
@@ -1483,6 +1497,7 @@ function applyDownloadSettings(settings) {
     // No upper bound in the contract — the backend is the authority on clamping
     document.getElementById('rateLimitKbps').value = clampInt(settings.rate_limit_kbps, 0, Infinity, 0);
     document.getElementById('downloadArchiveToggle').checked = settings.use_download_archive !== false;
+    document.getElementById('fastTrimToggle').checked = settings.fast_trim !== false;
     document.getElementById('preciseTrimToggle').checked = settings.precise_trim === true;
     document.getElementById('logToggle').checked = settings.log_to_file === true;
 
@@ -1567,6 +1582,7 @@ async function saveDownloadSettings() {
         concurrent_fragments: clampInt(document.getElementById('concurrentFragments').value, 1, 16, 4),
         rate_limit_kbps: clampInt(document.getElementById('rateLimitKbps').value, 0, Infinity, 0),
         use_download_archive: document.getElementById('downloadArchiveToggle').checked,
+        fast_trim: document.getElementById('fastTrimToggle').checked,
         precise_trim: document.getElementById('preciseTrimToggle').checked,
         log_to_file: document.getElementById('logToggle').checked,
         container: document.getElementById('containerSelect').value,
