@@ -46,9 +46,16 @@ jobs:
           fi
           echo "RELEASE_NAME=FinFetcher v$VERSION" >> $GITHUB_OUTPUT
       
+      - name: Generate version resource
+        run: python make_version_info.py version_info.txt
+
+      # --noupx and the version resource each removed an antivirus detection on
+      # VirusTotal. UPX is a packer, which engines score on regardless of what
+      # is inside, and the runners have it on PATH so PyInstaller uses it unless
+      # told not to.
       - name: Build EXE
         run: |
-          python -m PyInstaller --onefile --windowed --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
+          python -m PyInstaller --onefile --windowed --noupx --version-file version_info.txt --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
       
       - name: Create Release
         uses: softprops/action-gh-release@v1

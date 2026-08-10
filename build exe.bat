@@ -25,9 +25,15 @@ echo [1/3] Building EXE (this may take a few minutes)...
 echo       FFmpeg will be auto-downloaded on first run.
 echo.
 
-REM Build with PyInstaller - no ffmpeg bundled (auto-downloads on first run)
-py -3.13 -m PyInstaller --onefile --windowed --name %EXE_NAME% --distpath %OUTPUT_DIR% ^
+REM Version resource, generated from version.txt (antivirus scores an exe
+REM without one as suspicious)
+py -3.13 make_version_info.py version_info.txt
+
+REM Build with PyInstaller - no ffmpeg bundled (auto-downloads on first run).
+REM --noupx matters: packed binaries pick up antivirus detections on their own.
+py -3.13 -m PyInstaller --onefile --windowed --noupx --name %EXE_NAME% --distpath %OUTPUT_DIR% ^
     --icon "icon.ico" ^
+    --version-file "version_info.txt" ^
     --add-data "index.html;." ^
     --add-data "style.css;." ^
     --add-data "script.js;." ^

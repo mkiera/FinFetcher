@@ -11,3 +11,4 @@ dist/
 
 # FFmpeg binaries (download separately for builds)
 ffmpeg/
+version_info.txt

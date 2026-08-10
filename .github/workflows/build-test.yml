@@ -49,9 +49,14 @@ jobs:
             echo "NAME=${BRANCH_NAME}" >> $GITHUB_OUTPUT
           fi
       
+      - name: Generate version resource
+        run: python make_version_info.py version_info.txt
+
+      # Kept identical to the release build, so a test artifact is scored the
+      # same way by antivirus as the thing that eventually ships.
       - name: Build EXE
         run: |
-          python -m PyInstaller --onefile --windowed --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
+          python -m PyInstaller --onefile --windowed --noupx --version-file version_info.txt --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
       
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
