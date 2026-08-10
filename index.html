@@ -334,6 +334,11 @@
                         onclick="switchUpdateTab('alpha')">Alpha</button>
                 </div>
 
+                <!-- Which build this copy actually is. Only the Alpha tab fills
+                     it in: there, every row shares one version string and the
+                     commit is the only thing telling them apart. -->
+                <div id="currentBuildLine" class="current-build-line hidden"></div>
+
                 <div id="releasesList" class="releases-list">
                     <div class="releases-loading">Select a channel to view releases</div>
                 </div>

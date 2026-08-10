@@ -17,3 +17,7 @@ build_vernum.tmp
 # FFmpeg binaries (download separately for builds)
 ffmpeg/
 version_info.txt
+
+# Generated per build by make_build_info.py — committing it would ship one
+# build's commit stamp inside every later build
+build_info.json

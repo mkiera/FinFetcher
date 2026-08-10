@@ -866,14 +866,13 @@ function showReleasesMessage(listEl, message) {
 
 // Why a release cannot be installed from in here, or null when it can be.
 //
-// is_installer comes from the backend's _is_installer_name and is false only
-// for the bare-exe builds up to 1.2.4: running one of those would launch the
-// old version out of the updates folder and change nothing, so apply_update
-// refuses it — after the whole download. The row has to say so first.
+// is_installer is false only for the bare-exe builds up to 1.2.4: running one
+// of those would launch the old version out of the updates folder and change
+// nothing, so apply_update refuses it — after the whole download. The row has
+// to say so first.
 //
-// Tested against false rather than falsiness on purpose: the alpha artifacts
-// endpoint sends an exe_asset with no is_installer key at all (the installer
-// is picked out of the zip after downloading), and those stay installable.
+// Both channels supply the key: releases get it from _is_installer_name reading
+// the asset name, alpha builds from the artifact name (see update_artifacts).
 function releaseBlockedReason(release) {
     if (!release.exe_asset) return 'No download attached to this release.';
     if (release.exe_asset.is_installer === false) {
@@ -920,12 +919,74 @@ function buildReleaseRow(label, badges, dateText, note) {
     return row;
 }
 
+// Alpha builds land several times a day and all carry the same version string,
+// so the date alone does not identify one. Everywhere else a version number
+// already does, and the plain date reads better.
+function formatBuildTime(isoString) {
+    if (!isoString) return '';
+    const when = new Date(isoString);
+    if (isNaN(when)) return '';
+    return when.toLocaleString([], {
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: 'numeric', minute: '2-digit',
+    });
+}
+
+// Says which of the listed builds you are actually running.
+//
+// current_build.sha is only present in builds made after CI started stamping
+// them, so this deliberately has two registers: an exact commit when it can
+// prove one, and a build time when all it can do is let you compare by eye.
+function renderCurrentBuildLine(build, currentVersion) {
+    const el = document.getElementById('currentBuildLine');
+    if (!el) return;
+    el.innerHTML = '';
+    el.classList.remove('hidden');
+
+    const label = document.createElement('span');
+    label.className = 'current-build-label';
+    label.textContent = 'This copy: ';
+    el.appendChild(label);
+
+    const value = document.createElement('span');
+    value.className = 'current-build-value';
+    const sha = (build && build.sha) ? String(build.sha).slice(0, 7) : '';
+    const branch = (build && build.branch) || '';
+    if (sha) {
+        value.textContent = branch ? `${branch} @ ${sha}` : sha;
+    } else {
+        value.textContent = `v${currentVersion}`;
+    }
+    el.appendChild(value);
+
+    const built = formatBuildTime(build && build.built_at);
+    if (built) {
+        const time = document.createElement('span');
+        time.className = 'current-build-time';
+        time.textContent = sha ? ` · built ${built}` : ` · file dated ${built}`;
+        el.appendChild(time);
+    }
+
+    if (!sha) {
+        const hint = document.createElement('div');
+        hint.className = 'current-build-hint';
+        hint.textContent = built
+            ? 'Builds from before this version did not record their commit, so no row below can be marked as the one you are running — compare that timestamp against the build times instead. Installing any alpha from here fixes it.'
+            : 'This build did not record its commit, so no row below can be marked as the one you are running. Installing any alpha from here fixes it.';
+        el.appendChild(hint);
+    }
+}
+
 async function fetchReleases(channel) {
     const listEl = document.getElementById('releasesList');
     showReleasesMessage(listEl, 'Loading releases...');
     selectedRelease = null;
     document.getElementById('installSelectedBtn').disabled = true;
     document.getElementById('installSelectedBtn').textContent = 'Update';
+
+    // Only meaningful for alpha; the other channels re-hide it on every switch
+    const buildLineEl = document.getElementById('currentBuildLine');
+    if (buildLineEl && channel !== 'alpha') buildLineEl.classList.add('hidden');
 
     try {
         // Alpha channel uses artifacts endpoint
@@ -946,24 +1007,36 @@ async function fetchReleases(channel) {
             const footerVersion = document.getElementById('settingsVersionDisplay');
             if (footerVersion) footerVersion.textContent = `v${data.current_version}`;
 
+            renderCurrentBuildLine(data.current_build, data.current_version);
+
             listEl.innerHTML = '';
             let firstSelectable = null;
 
             data.artifacts.forEach(artifact => {
-                const date = artifact.published_at
-                    ? new Date(artifact.published_at).toLocaleDateString()
-                    : '';
+                // Time as well as date: several of these can land in one day
+                const date = formatBuildTime(artifact.published_at);
+
+                // The build you are already running is no more installable than
+                // the current release is on the other tabs, so it gets the same
+                // treatment rather than a reason it cannot be installed
+                const blocked = artifact.is_current ? null : releaseBlockedReason(artifact);
 
                 const badges = [];
+                if (artifact.is_current) {
+                    badges.push({ text: 'current', className: 'current-badge' });
+                }
                 if (artifact.version) {
-                    badges.push({ text: `v${artifact.version}`, className: 'current-badge' });
+                    badges.push({ text: `v${artifact.version}`, className: 'version-badge' });
                 }
                 badges.push({ text: artifact.sha, className: 'pre-badge' });
+                if (blocked) badges.push({ text: 'manual install', className: 'blocked-badge' });
 
-                const row = buildReleaseRow(artifact.branch, badges, date);
+                const row = buildReleaseRow(artifact.branch, badges, date, blocked);
+                if (artifact.is_current) row.classList.add('current');
+                if (blocked) row.classList.add('blocked');
                 row.dataset.version = artifact.branch;
 
-                if (artifact.exe_asset) {
+                if (artifact.exe_asset && !blocked && !artifact.is_current) {
                     // Give it a synthetic version for the update flow
                     artifact.version = `${artifact.branch}@${artifact.sha}`;
                     row.style.cursor = 'pointer';

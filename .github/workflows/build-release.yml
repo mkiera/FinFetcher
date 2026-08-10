@@ -53,6 +53,9 @@ jobs:
           printf '%s' "$VERSION" > version.txt
           echo "version.txt is now: $(cat version.txt)"
 
+      - name: Stamp the build with its commit and run
+        run: python make_build_info.py build_info.json
+
       - name: Generate version resource
         run: python make_version_info.py version_info.txt
 
@@ -65,7 +68,7 @@ jobs:
       # so the --add-data files still land where main.pyw looks for them.
       - name: Build app folder
         run: |
-          python -m PyInstaller --onedir --windowed --noupx --version-file version_info.txt --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
+          python -m PyInstaller --onedir --windowed --noupx --version-file version_info.txt --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "build_info.json;." --add-data "icon.ico;." --clean --noconfirm main.pyw
 
       # A Windows version resource needs four plain numbers, and the release tag
       # can be something like 1.2.4f-media-options. Reuse the app's own rule for
@@ -124,7 +127,7 @@ jobs:
       # Drop this once the old builds are gone.
       - name: Build legacy single-file exe
         run: |
-          python -m PyInstaller --onefile --windowed --noupx --version-file version_info.txt --name "FinFetcher" --distpath dist_legacy --workpath build_legacy --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
+          python -m PyInstaller --onefile --windowed --noupx --version-file version_info.txt --name "FinFetcher" --distpath dist_legacy --workpath build_legacy --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "build_info.json;." --add-data "icon.ico;." --clean --noconfirm main.pyw
 
       - name: Create Release
         id: release

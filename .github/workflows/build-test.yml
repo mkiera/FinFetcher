@@ -49,6 +49,9 @@ jobs:
             echo "NAME=${BRANCH_NAME}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Stamp the build with its commit and run
+        run: python make_build_info.py build_info.json
+
       - name: Generate version resource
         run: python make_version_info.py version_info.txt
 
@@ -59,7 +62,7 @@ jobs:
       # where main.pyw looks for them.
       - name: Build app folder
         run: |
-          python -m PyInstaller --onedir --windowed --noupx --version-file version_info.txt --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
+          python -m PyInstaller --onedir --windowed --noupx --version-file version_info.txt --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "build_info.json;." --add-data "icon.ico;." --clean --noconfirm main.pyw
 
       # A Windows version resource needs four plain numbers, and version.txt can
       # say something like 1.2.4f-media-options. Reuse the app's own rule for
@@ -112,6 +115,11 @@ jobs:
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: FinFetcher_${{ steps.build_name.outputs.NAME }}
+          # "Setup" in the name is how the Alpha tab knows, before downloading
+          # anything, that this artifact holds an installer and can therefore
+          # replace an installed copy. Runs from before the installer existed
+          # are named FinFetcher_<branch> and stay in the Actions history
+          # forever, so the app marks those "manual install" instead.
+          name: FinFetcher-Setup_${{ steps.build_name.outputs.NAME }}
           path: dist_installer/FinFetcher-Setup.exe
           retention-days: 30

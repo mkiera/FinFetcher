@@ -28,6 +28,10 @@ REM Version resource, generated from version.txt (antivirus scores an exe
 REM without one as suspicious)
 py -3.13 make_version_info.py version_info.txt
 
+REM Records which commit this build came from, so the app can tell itself apart
+REM from the other builds of the same version listed in the Alpha tab
+py -3.13 make_build_info.py build_info.json
+
 REM Build with PyInstaller - no ffmpeg bundled (auto-downloads on first run).
 REM --onedir, not --onefile: the single-file build is what Defender and Chrome
 REM flag, and a onedir build was the only variant Microsoft left alone.
@@ -41,6 +45,7 @@ py -3.13 -m PyInstaller --onedir --windowed --noupx --name %EXE_NAME% ^
     --add-data "style.css;." ^
     --add-data "script.js;." ^
     --add-data "version.txt;." ^
+    --add-data "build_info.json;." ^
     --add-data "icon.ico;." ^
     --clean --noconfirm main.pyw
 

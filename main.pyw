@@ -456,6 +456,50 @@ class UpdateManager:
         except Exception:
             return '0.0.0'
 
+    def get_build_info(self):
+        """Identify the exact build this copy came from.
+
+        version.txt is the same string for every build off a branch, so it
+        cannot answer "am I on the newest alpha?". CI writes build_info.json
+        next to it with the commit and run that produced the build, which can
+        be matched against the artifact list exactly.
+
+        Builds made before that file existed return sha None — the caller has
+        to fall back to something weaker (see built_at below) rather than
+        claim a match it cannot prove.
+        """
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.dirname(os.path.abspath(__file__))
+
+        info = {'sha': None, 'branch': None, 'run_id': None, 'built_at': None}
+        try:
+            with open(os.path.join(base_path, 'build_info.json'), encoding='utf-8') as f:
+                stamped = json.load(f)
+            if isinstance(stamped, dict):
+                for key in info:
+                    value = stamped.get(key)
+                    if value not in (None, ''):
+                        info[key] = value
+        except Exception:
+            pass
+
+        # No stamp: date the copy from a file CI produced and nothing since
+        # touches. PyInstaller writes the exe when it builds, and both the
+        # release zip and Inno Setup preserve timestamps, so this lands near
+        # the build time — near enough to compare against the list by eye.
+        if not info['built_at']:
+            try:
+                from datetime import datetime, timezone
+                stamp_source = sys.executable if getattr(sys, 'frozen', False) else __file__
+                mtime = os.path.getmtime(stamp_source)
+                info['built_at'] = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
+                info['built_at_is_estimate'] = True
+            except Exception:
+                pass
+        return info
+
     @staticmethod
     def _parse_version(version_str):
         """Parse a version string into a comparable tuple.
@@ -1619,6 +1663,7 @@ def update_artifacts():
     and constructs nightly.link URLs for unauthenticated download.
     """
     current_version = update_manager.get_current_version()
+    build_info = update_manager.get_build_info()
     try:
         # Fetch recent successful runs from the build-test workflow
         api_url = (
@@ -1669,10 +1714,19 @@ def update_artifacts():
                     })
                 with urlopen(art_req, timeout=5, context=get_ssl_context()) as art_resp:
                     artifacts = json.loads(art_resp.read().decode('utf-8')).get('artifacts', [])
-                artifacts = [a for a in artifacts if not a.get('expired')]
-                if artifacts:
-                    artifact_name = artifacts[0].get('name', artifact_name)
+                live = [a for a in artifacts if not a.get('expired')]
+                if not live:
+                    # build-test.yml keeps artifacts for 30 days, but the run
+                    # itself lives in the Actions history forever — which is also
+                    # why branches that were deleted long ago still appear here.
+                    # Listing a build whose file is gone only offers the user a
+                    # download that 404s, so drop it.
+                    continue
+                artifact_name = live[0].get('name', artifact_name)
             except Exception:
+                # Could not ask — rate limited, offline. That is not evidence the
+                # artifact is gone, so keep the row rather than hiding a build
+                # that may well be downloadable.
                 pass
             download_url = f'https://nightly.link/mkiera/FinFetcher/actions/runs/{run_id}/{artifact_name}.zip'
 
@@ -1686,11 +1740,22 @@ def update_artifacts():
             except Exception:
                 pass
 
+            # Run id first: a branch can be rebuilt at the same commit, and the
+            # run is what the installed copy actually came out of. Commit is the
+            # fallback for a build stamped before run ids were recorded.
+            stamped_run = build_info.get('run_id')
+            stamped_sha = (build_info.get('sha') or '')[:7]
+            is_current = bool(
+                (stamped_run and str(stamped_run) == str(run_id))
+                or (stamped_sha and stamped_sha == sha)
+            )
+
             result.append({
                 'branch': branch,
                 'sha': sha,
                 'version': version,
                 'run_id': run_id,
+                'is_current': is_current,
                 'artifact_name': artifact_name,
                 'published_at': run.get('created_at', ''),
                 'html_url': run.get('html_url', ''),
@@ -1698,16 +1763,26 @@ def update_artifacts():
                     'name': f'{artifact_name}.zip',
                     'url': download_url,
                     'size': 0,  # Unknown until download
+                    # What is inside the zip decides whether self-update can use
+                    # it, and the name is the only way to know before
+                    # downloading: build-test.yml uploads the installer as
+                    # FinFetcher-Setup_<branch>, while every run from before the
+                    # installer existed uploaded a bare exe as
+                    # FinFetcher_<branch>. Those runs stay in the Actions
+                    # history for good, so this stays true for good.
+                    'is_installer': 'setup' in artifact_name.lower(),
                 },
             })
 
         return jsonify({
             'artifacts': result,
             'current_version': current_version,
+            'current_build': build_info,
         })
 
     except Exception as e:
-        return jsonify({'error': str(e), 'artifacts': [], 'current_version': current_version})
+        return jsonify({'error': str(e), 'artifacts': [], 'current_version': current_version,
+                        'current_build': build_info})
 
 
 # ============ Settings API Endpoints ============
