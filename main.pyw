@@ -18,6 +18,7 @@ import zipfile
 import tempfile
 import shutil
 import yt_dlp
+from yt_dlp.postprocessor import PostProcessor
 from yt_dlp.utils import DownloadCancelled, download_range_func
 from flask import Flask, request, jsonify, send_from_directory, Response
 from urllib.request import urlopen, Request
@@ -268,6 +269,67 @@ def get_ffmpeg_dir():
     return None
 
 
+def ensure_ffmpeg_discoverable():
+    """Make our ffmpeg visible to the yt-dlp probes that ignore ffmpeg_location.
+
+    yt-dlp only downloads a byte range instead of the whole video when it picks
+    FFmpegFD, and it only picks FFmpegFD when FFmpegFD.available() is true
+    (yt_dlp/downloader/__init__.py:92). That call is
+    `FFmpegPostProcessor().available` with no downloader attached
+    (yt_dlp/downloader/external.py:458-462), and with no downloader
+    PostProcessor.get_param returns its default, so _determine_executables
+    never sees the ffmpeg_location we put in the options dict and falls back to
+    the bare names 'ffmpeg'/'ffprobe', which are resolved through PATH
+    (yt_dlp/postprocessor/ffmpeg.py:102-107). This app keeps ffmpeg in
+    %APPDATA%\\FinFetcher\\ffmpeg, which is on nobody's PATH, so a ranged
+    download was refused outright — "You have requested downloading the video
+    partially, but ffmpeg is not installed" (YoutubeDL.py:3440-3445) — and this
+    app's fallback then fetched the whole video and re-encoded it, which is the
+    exact cost fast trim exists to avoid.
+
+    Both mechanisms are used because neither covers the other:
+      - PATH is process-wide and permanent, so it fixes the probe on every
+        thread, including any that ran before this call.
+      - FFmpegPostProcessor._ffmpeg_location is the ContextVar yt-dlp's own CLI
+        sets for precisely this reason (yt_dlp/__init__.py:974). It pins the
+        exact binary rather than whatever PATH happens to resolve, and it is
+        the only route left once a probe has already cached a miss:
+        _version_cache is keyed by path (ffmpeg.py:130-135), so a bare 'ffmpeg'
+        that failed once stays failed for the life of the process no matter
+        what PATH says afterwards. Being a ContextVar it is per-thread, so this
+        has to be called again on the thread that runs the download.
+
+    Does nothing when ffmpeg is not installed: handing yt-dlp a directory that
+    does not exist makes _determine_executables return {} and stop consulting
+    PATH at all, which would break the one case that already works — a user
+    whose ffmpeg came from somewhere else entirely.
+
+    Returns True when ffmpeg was found and pointed at.
+    """
+    if not ffmpeg_manager.is_installed():
+        return False
+
+    ffmpeg_dir = ffmpeg_manager.get_ffmpeg_dir()
+
+    entries = [p for p in os.environ.get('PATH', '').split(os.pathsep) if p]
+    if not any(os.path.normcase(p) == os.path.normcase(ffmpeg_dir) for p in entries):
+        os.environ['PATH'] = os.pathsep.join([ffmpeg_dir, *entries])
+
+    try:
+        from yt_dlp.postprocessor.ffmpeg import FFmpegPostProcessor
+        FFmpegPostProcessor._ffmpeg_location.set(ffmpeg_dir)
+    except Exception:
+        # A yt-dlp without that ContextVar. PATH above still answers the
+        # probe, so this is not worth failing a download over.
+        pass
+    return True
+
+
+# Do it once at startup as well, before anything can probe for ffmpeg and cache
+# the miss that no later PATH change could undo.
+ensure_ffmpeg_discoverable()
+
+
 # ============ Update Manager ============
 
 class UpdateManager:
@@ -282,23 +344,68 @@ class UpdateManager:
         self._config = self._load_config()
         self.last_download_error = None
         self._remove_legacy_updater()
+        self._clear_updates_dir()
+
+    # Files older builds wrote into the app data directory to update
+    # themselves. Both were this app's own doing, and nothing generates or runs
+    # either any more.
+    LEGACY_UPDATER_FILES = (
+        # The exe-swapping batch script builds up to 1.2.4 used. It deleted
+        # itself on its last line, so one only survives an update that was
+        # interrupted part way through.
+        'update.bat',
+        # The Python helper that preceded that batch script, copied out of the
+        # PyInstaller temp dir so it would outlive the app it was replacing.
+        'updater_helper.py',
+    )
 
     @staticmethod
     def _remove_legacy_updater():
-        """Clear away the exe-swapping batch script builds up to 1.2.4 used.
+        """Clear away the updater scripts builds up to 1.2.4 left in AppData.
 
-        That script deleted itself on its last line, so one only survives an
-        update that was interrupted part way through. Nothing generates or
-        runs it any more, and a stale copy sitting in AppData is one more
-        thing for a future reader to wonder about. Best effort: if cmd.exe
-        still has it open the delete fails, and it will go on the next start.
+        A stale copy sitting there is one more thing for a future reader to
+        wonder about. Best effort: if something still has one open the delete
+        fails, and it will go on the next start.
         """
+        for name in UpdateManager.LEGACY_UPDATER_FILES:
+            try:
+                legacy = os.path.join(FFmpegManager.get_app_data_dir(), name)
+                if os.path.isfile(legacy):
+                    os.remove(legacy)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _clear_updates_dir():
+        """Delete the installers left behind by earlier update attempts.
+
+        Everything in the updates directory was put there by download_update,
+        so this only ever removes this app's own downloads — nothing else
+        writes to it. They cannot be cleaned up when they are used: apply_update
+        hands the file to Windows and the app exits immediately so the installer
+        can replace it, which leaves ~100 MB per update sitting in AppData
+        forever. Startup is the next moment at which they are provably
+        finished with, and that is where the batch updater these replaced did
+        its own tidying up.
+
+        Best effort. The obvious failure is the installer that just ran us
+        still holding its own exe open, and one more launch will clear it.
+        """
+        updates_dir = UpdateManager.get_updates_dir()
         try:
-            legacy_bat = os.path.join(FFmpegManager.get_app_data_dir(), 'update.bat')
-            if os.path.isfile(legacy_bat):
-                os.remove(legacy_bat)
-        except Exception:
-            pass
+            entries = os.listdir(updates_dir)
+        except OSError:
+            return  # never downloaded anything, or cannot be read
+        for entry in entries:
+            target = os.path.join(updates_dir, entry)
+            try:
+                # A zipped CI artifact extracts into a subdirectory of its own
+                if os.path.isdir(target) and not os.path.islink(target):
+                    shutil.rmtree(target, ignore_errors=True)
+                else:
+                    os.remove(target)
+            except OSError:
+                pass
 
     def _load_config(self):
         """Load update-related config from the shared config file."""
@@ -591,6 +698,26 @@ class UpdateManager:
                             total_mb = total_size / (1024 * 1024)
                             progress_callback(percent, f"Downloading... {size_mb:.1f}/{total_mb:.1f} MB")
 
+            # A read loop that stops on the first empty chunk cannot tell the
+            # end of the body from a connection cut, and the file this produces
+            # is one we go on to *execute* as an installer. Compare it with the
+            # length the server promised and refuse anything short, rather than
+            # reporting a truncated installer as a finished download.
+            #
+            # Only when there is something to compare against: a chunked
+            # response carries no Content-Length, and total_size is 0 then. That
+            # is not a failure, just an unverifiable transfer — the guards in
+            # apply_update still stand behind it.
+            if total_size > 0 and downloaded != total_size:
+                _remove_file_with_retry(dest_path)
+                self.last_download_error = (
+                    f'The download stopped early — got {downloaded} bytes of the '
+                    f'{total_size} the server said it would send. The file was '
+                    'incomplete and has been deleted; please try again.')
+                if progress_callback:
+                    progress_callback(0, self.last_download_error)
+                return None
+
             # If it's a zip (e.g. GitHub Actions artifact), extract the exe
             if asset_name.lower().endswith('.zip'):
                 if progress_callback:
@@ -669,7 +796,97 @@ class UpdateManager:
     # How long to watch the installer before believing it started. Setup
     # refuses (bad file, blocked by policy, "cannot proceed") by exiting almost
     # immediately, so a short watch catches that while it is still cheap.
+    #
+    # It cannot usefully be much longer, and lengthening it would not buy the
+    # certainty it looks like it would: Setup's "Preparing to Install" stage is
+    # where /CLOSEAPPLICATIONS shuts this app down, so a watch that ran on into
+    # it would be waiting for an answer while being closed for the privilege.
     INSTALLER_START_TIMEOUT = 1.5
+
+    # What Setup's exit codes mean, from the Inno Setup help, "Setup Exit
+    # Codes". 0 is absent because it is success and is handled on its own.
+    INSTALLER_EXIT_CODES = {
+        1: 'It failed to initialise.',
+        2: 'It was cancelled before the installation started.',
+        3: 'A fatal error occurred while it was preparing to install.',
+        4: 'A fatal error occurred during the installation.',
+        5: 'It was cancelled during the installation.',
+        6: 'It was terminated by a debugger.',
+        7: 'It decided it could not proceed with the installation.',
+        8: 'It decided it could not proceed until the system is restarted.',
+    }
+
+    # Setup writes this immediately before putting a dialog on screen...
+    SETUP_LOG_MSGBOX_PREFIX = 'Message box ('
+    # ...and this once somebody has answered one.
+    SETUP_LOG_ANSWERED_PREFIX = 'User chose '
+
+    @staticmethod
+    def get_update_log_path():
+        """Where the installer is told to write its log.
+
+        Worth naming: it is the only account of an update that survives this
+        app exiting, so every message about a failed update points at it.
+        """
+        return os.path.join(FFmpegManager.get_app_data_dir(), 'update.log')
+
+    @staticmethod
+    def _read_setup_log(log_path):
+        """Setup's /LOG as a list of messages, continuations folded in.
+
+        Each message is written as "<timestamp>   <text>"; one that spans lines
+        has its continuations indented and carrying no timestamp of their own.
+        The file is UTF-8 with a BOM. An empty list means Setup has not opened
+        it yet, which is not the same as nothing being wrong.
+        """
+        try:
+            with open(log_path, encoding='utf-8-sig', errors='replace') as f:
+                lines = f.read().splitlines()
+        except OSError:
+            return []  # not created yet, or not readable
+
+        messages = []
+        for line in lines:
+            text = line.strip()
+            if not text:
+                continue
+            if messages and not line[:1].isdigit():
+                messages[-1] += ' ' + text  # a continuation of the one above
+            else:
+                # Drop the timestamp Setup stamps on the front of every message
+                _, _, remainder = text.partition('   ')
+                messages.append(remainder.strip() or text)
+        return messages
+
+    @classmethod
+    def _pending_dialog(cls, messages):
+        """The message box Setup is sitting on right now, or None.
+
+        Setup logs "Message box (<buttons>): <text>" and flushes it *before* the
+        box appears, and logs "User chose ..." only once the box has been
+        answered — so an unanswered one at the end of the log is a Setup that
+        has stopped and is waiting for a person. Checked against the Inno Setup
+        6.7.3 this project builds with, by running a Setup that opens a dialog
+        with the switches below and reading its log while the box was still up:
+        the entry was there 11 ms in and the file did not change for as long as
+        the box stayed on screen.
+
+        This is the one honest signal available in the moment before we exit.
+        /SUPPRESSMSGBOXES is deliberately not passed (see INSTALLER_SWITCHES)
+        and a silent update has nothing it needs to ask, so any dialog at all
+        means something has gone wrong.
+        """
+        pending = None
+        for message in messages:
+            if message.startswith(cls.SETUP_LOG_MSGBOX_PREFIX):
+                pending = message
+            elif message.startswith(cls.SETUP_LOG_ANSWERED_PREFIX):
+                pending = None
+        if not pending:
+            return None
+        # Drop the "Message box (OK):" preamble — only the words matter here
+        _, _, text = pending.partition(':')
+        return text.strip() or pending
 
     def apply_update(self, installer_path):
         """Run a downloaded installer so it can replace this installation.
@@ -684,10 +901,20 @@ class UpdateManager:
         Only supported for the packaged app. Running from source there is
         nothing to install over — the "old exe" would be main.pyw itself.
 
-        Returns (True, None) when the installer is running and the caller may
-        exit, or (False, reason) when it is not. On (False, reason) the app
-        must stay up: a user with neither the old app nor the new one has no
-        way back, so every refusal here is one the UI can show and act on.
+        Returns (started, message). started is False when nothing was launched
+        or when the installer has visibly stopped on a dialog, and the app must
+        then stay up: a user with neither the old app nor the new one has no way
+        back, so every refusal here is one the UI can show and act on.
+
+        started True does NOT mean the update worked, and the message says so.
+        Only one outcome here is ever certain — Setup exiting 0 inside the watch
+        below — because the installer cannot replace these files until this
+        process is gone, and once it is gone there is nothing left to notice a
+        failure, let alone report one. What is left is to spend the moment
+        before exiting on the two things Setup will actually tell us: the exit
+        code if it gives up straight away, and its /LOG if it stops to ask
+        something. Beyond that the ambiguity is the design's, not a gap in the
+        checking, and the wording is honest about it rather than promising.
         """
         if not getattr(sys, 'frozen', False):
             return False, ('Self-update is only available in the packaged app — '
@@ -712,7 +939,16 @@ class UpdateManager:
                 'from Windows Settings first, then run that download yourself. It is '
                 f'kept at {installer_path}.')
 
-        log_path = os.path.join(FFmpegManager.get_app_data_dir(), 'update.log')
+        log_path = self.get_update_log_path()
+
+        # Start from no log at all, so whatever is in it afterwards provably
+        # belongs to this attempt. Setup does overwrite the file when it opens
+        # it — checked by pointing two runs of the same installer at one log,
+        # which left one "Log opened." in it — but it only opens it once it has
+        # got that far, and how far it got is the very thing being read.
+        # One attempt, no retries: a locked update.log is not worth stalling an
+        # update for, and Setup would overwrite it anyway.
+        _remove_file_with_retry(log_path, attempts=1)
 
         creationflags = 0
         if os.name == 'nt':
@@ -738,14 +974,44 @@ class UpdateManager:
             code = proc.wait(timeout=self.INSTALLER_START_TIMEOUT)
         except subprocess.TimeoutExpired:
             code = None  # still running, which is the normal case
-        if code not in (None, 0):
-            # Documented Setup exit codes: 1 failed to initialise, 2 cancelled
-            # before installing, 3/4 fatal error, 5 cancelled during install,
-            # 7/8 "cannot proceed".
-            return False, (f'The installer stopped straight away (exit code {code}). '
-                           f'Details are in {log_path}.')
 
-        return True, None
+        messages = self._read_setup_log(log_path)
+        asking = self._pending_dialog(messages)
+
+        if code is not None and code != 0:
+            return False, ' '.join(part for part in (
+                f'The installer stopped straight away (exit code {code}).',
+                self.INSTALLER_EXIT_CODES.get(code, ''),
+                f'It said: "{asking}"' if asking else '',
+                f'Its log is at {log_path}.') if part)
+
+        if code == 0:
+            # The one outcome that is not a guess. 0 is "Setup was successfully
+            # run to completion", and the installer's [Run] entry has already
+            # started the new version, so this process is now simply the stale
+            # one and nothing here holds a file the installer still wants.
+            return True, ('The update is installed, and the new version has already '
+                          'started. FinFetcher will close now.')
+
+        if asking:
+            # Setup is on screen waiting for an answer it will wait for forever.
+            # Exiting into that would leave the user with a dialog and no app to
+            # explain it — which is exactly the case that used to look identical
+            # to a healthy install — so stay up and say what it is asking.
+            return False, (
+                'The installer has stopped to ask something and is waiting for an '
+                f'answer: "{asking}" FinFetcher has stayed open rather than leave '
+                'you with a dialog and nothing else. Deal with the installer '
+                f'window first; its log is at {log_path}.')
+
+        # Running, and it has not said anything is wrong. That is the whole of
+        # what can be known from here, so say that and no more.
+        return True, (
+            'The installer is running'
+            + ('' if messages else ' but has not written to its log yet')
+            + ', and FinFetcher has to close so it can replace these files. This '
+            'app cannot see how the install ends — if FinFetcher does not reopen '
+            f'on the new version, the installer wrote what happened to {log_path}.')
 
 
 # Global UpdateManager instance
@@ -776,6 +1042,10 @@ class AppSettings:
         # range downloads. Turning it off snaps cuts to the nearest keyframe
         # (faster, no re-encode at the boundaries).
         'precise_trim': True,
+        # Sits in the same settings panel as everything else here, so it has to
+        # survive a restart like everything else here. The download request still
+        # carries its own log_to_file flag; this is the remembered default.
+        'log_to_file': False,
         'container': 'mp4',
         'audio_format': 'mp3',
         'audio_quality': '0',
@@ -930,12 +1200,34 @@ class AppSettings:
         # Everything else in the contract is a checkbox
         return self._as_bool(value, fallback)
 
+    @staticmethod
+    def _settle(values):
+        """Resolve the settings whose real meaning depends on another setting.
+
+        SponsorBlock with every category unticked is not "on, with nothing to
+        remove". apply_media_opts has to treat an empty category list as off,
+        because yt-dlp reads one as *every* category (SponsorBlockPP.__init__,
+        yt_dlp/postprocessor/sponsorblock.py:36) and would cut far more than was
+        asked for — so the switch in that state does nothing at all, and does it
+        silently. Storing it as off is simply what the app is going to do, and
+        since the settings panel reads its state back from here, it is also what
+        the switch will show: the no-op state cannot be reached or persisted.
+
+        The cost is that re-ticking a category does not turn SponsorBlock back
+        on by itself. That is the right way round — the switch went off because
+        it had stopped meaning anything, and turning it on again should be the
+        user's decision rather than a side effect of a checkbox.
+        """
+        if not values['sponsorblock_categories']:
+            values['sponsorblock_enabled'] = False
+        return values
+
     def _normalise(self, raw, base=None):
         """Build the full settings set from raw values, validating each one."""
         if base is None:
             base = self.DEFAULTS
-        return {key: self._coerce(key, raw.get(key, base[key]), base[key])
-                for key in self.DEFAULTS}
+        return self._settle({key: self._coerce(key, raw.get(key, base[key]), base[key])
+                             for key in self.DEFAULTS})
 
     def get_settings(self):
         """Return the full settings contract with defaults applied."""
@@ -1206,22 +1498,38 @@ def update_apply():
     if not downloaded_path or not isinstance(downloaded_path, str):
         return jsonify({'success': False, 'error': 'Downloaded file not found'})
 
-    # Every guard — frozen, inside the updates folder, actually the installer —
-    # lives in apply_update, next to the line that runs the file.
-    started, error = update_manager.apply_update(downloaded_path)
+    # Applying an update ends with os._exit(0) so the installer can replace the
+    # files this process holds open. A download in flight dies with it, part way
+    # through a write, leaving a .part file and no explanation. The update can
+    # wait; the 2 GB already transferred cannot. (Defined further down the file,
+    # next to the download endpoints that own it.)
+    if is_download_running():
+        return jsonify({'success': False, 'error': (
+            'A download is still running. Installing an update closes '
+            'FinFetcher, which would abandon it part way through — wait for it '
+            'to finish, or cancel it, then install the update.')})
+
+    # Every guard — frozen, inside the updates folder, actually the installer,
+    # and whether Setup has already given up or stopped on a dialog — lives in
+    # apply_update, next to the line that runs the file.
+    started, message = update_manager.apply_update(downloaded_path)
 
     if not started:
-        # Nothing was launched, so this app is still the only one there is.
-        # Report why and stay running rather than exiting into nothing.
-        return jsonify({'success': False, 'error': error or 'Failed to start the installer'})
+        # Nothing was launched, or it launched and immediately stopped. Either
+        # way this app is still the only one there is, so report why and stay
+        # running rather than exiting into nothing.
+        return jsonify({'success': False, 'error': message or 'Failed to start the installer'})
 
-    # The installer cannot overwrite files this process still has open, so
-    # step aside — but only after the answer above has reached the page.
+    # success here means the installer is running, not that the update worked:
+    # this process is about to disappear and will never learn the outcome.
+    # message is that distinction in the words the page should show, and
+    # log_path is the only place the answer will exist afterwards.
     def shutdown():
         time.sleep(1)
         os._exit(0)
     threading.Thread(target=shutdown, daemon=True).start()
-    return jsonify({'success': True})
+    return jsonify({'success': True, 'message': message,
+                    'log_path': UpdateManager.get_update_log_path()})
 
 
 @app.route('/api/update/settings', methods=['GET', 'POST'])
@@ -1927,26 +2235,110 @@ def apply_performance_opts(ydl_opts, settings, download_type, save_path):
         ydl_opts['download_archive'] = os.path.join(save_path, '.finfetcher-archive.txt')
 
 
-# Containers EmbedThumbnailPP can actually hold a cover image in. It raises
-# EmbedThumbnailPPError for anything else, which aborts a finished download,
-# so webm and wav have to skip the post-processor rather than attempt it.
-# opus and flac go exclusively through mutagen, so they are only safe when
-# that import actually resolved — in a build without it, embedding would
-# fail a download that had already finished.
+# Every extension EmbedThumbnailPP can actually put a cover image into, read
+# off the chain of `info['ext']` tests in its run() (yt_dlp/postprocessor/
+# embedthumbnail.py:90-220 in 2026.02.04). It has no SUPPORTED_EXTS constant to
+# ask; that chain ends in a bare `else: raise EmbedThumbnailPPError`, and
+# YoutubeDL turns a PostProcessingError into report_error (YoutubeDL.py:
+# 3622-3625), so an unsupported container does not lose the cover image — it
+# fails a download whose file is already written and perfectly good.
+#
+# ogg, opus and flac are handled exclusively through mutagen, so they belong
+# here only when that import actually resolved; without it the post-processor
+# raises for those three as well.
 def _embeddable_thumbnail_exts():
-    exts = ['mp4', 'mkv', 'm4a', 'mp3']
+    exts = ['mp3', 'mkv', 'mka', 'm4a', 'mp4', 'm4v', 'mov']
     try:
         from yt_dlp.dependencies import mutagen as _mutagen
     except Exception:
         _mutagen = None
     if _mutagen is not None:
-        exts += ['opus', 'flac']
+        exts += ['ogg', 'opus', 'flac']
     return tuple(exts)
 
 
 EMBEDDABLE_THUMBNAIL_EXTS = _embeddable_thumbnail_exts()
-# FFmpegEmbedSubtitlePP.SUPPORTED_EXTS, minus the ones this app never produces
+# FFmpegEmbedSubtitlePP.SUPPORTED_EXTS, minus the ones this app never produces.
+# Belt and braces rather than load-bearing: that post-processor checks the
+# extension itself and skips with a message (ffmpeg.py:590-592), which is
+# exactly what EmbedThumbnailPP does not do.
 EMBEDDABLE_SUBTITLE_EXTS = ('mp4', 'mkv', 'webm', 'm4a')
+
+
+class FinFetcherThumbnailGuardPP(PostProcessor):
+    """Take the thumbnail away from EmbedThumbnail when the file cannot hold it.
+
+    Which container the file ends up in is not knowable when the options are
+    built. In audio mode it is — FFmpegExtractAudio forces the extension to the
+    chosen codec (yt_dlp/postprocessor/ffmpeg.py:528) — but a video download's
+    format selector ends in a bare "best", and if that is the branch that
+    matches, what arrives is a single progressive stream that keeps its own
+    extension: merge_output_format only ever applies to a merge (YoutubeDL.py:
+    3446-3459). So a request for mp4 can perfectly well produce a .webm, and
+    that combination used to fail the whole download at the last step, after
+    the file was on disk and correct.
+
+    yt-dlp has half of this itself — a merged webm is switched to mkv when an
+    EmbedThumbnailPP is registered (YoutubeDL.py:3450-3457) — but only for a
+    merge, and only when no merge_output_format was given, which is never the
+    case here. So the check has to happen with the file in hand, and this is
+    where: run in front of EmbedThumbnail, it empties the thumbnail list, which
+    is the quiet early exit that post-processor does offer (embedthumbnail.py:
+    61-68). Nothing raises, and the download stands.
+    """
+
+    def run(self, info):
+        ext = info.get('ext')
+        if ext in EMBEDDABLE_THUMBNAIL_EXTS:
+            return [], info
+
+        stranded = [thumb.get('filepath') for thumb in info.get('thumbnails') or []]
+        info['thumbnails'] = []
+        self.to_screen(f'{ext} cannot hold a cover image, so the thumbnail '
+                       'was not embedded')
+        # The image was only fetched in order to be embedded — writethumbnail is
+        # set for that and nothing else — so leaving it in the save folder would
+        # be litter the user never asked for. info= so its entry in
+        # __files_to_move goes with it and yt-dlp does not chase a deleted file.
+        self._delete_downloaded_files(*stranded, info=info)
+        return [], info
+
+
+def _register_thumbnail_guard():
+    """Make the guard usable as a `postprocessors` entry, and prove that it is.
+
+    yt-dlp resolves every {'key': ...} entry through
+    yt_dlp.postprocessor.get_postprocessor, which is a lookup in a plain dict of
+    registered post-processors — the same dict its own plugin loader writes into
+    (yt_dlp/postprocessor/__init__.py). Registering one class there is therefore
+    the intended shape of this, and it is what keeps the whole post-processor
+    chain in one ordered list in apply_media_opts instead of half of it being
+    bolted on afterwards, where it would land after FFmpegSplitChapters and the
+    split pieces would lose their cover art.
+
+    yt_dlp/globals.py says in as many words that the plugin/globals API carries
+    no compatibility guarantee, so nothing here is assumed: get_postprocessor
+    has to hand the class back before apply_media_opts will name it. Returns the
+    key to use, or None to fall back to a bare EmbedThumbnail with only the
+    container setting guarding it — the old behaviour.
+    """
+    try:
+        from yt_dlp import postprocessor as ytdlp_pps
+
+        registry = getattr(ytdlp_pps, 'postprocessors', None)
+        # An older yt-dlp looked the name up in the module's own namespace
+        registry = vars(ytdlp_pps) if registry is None else registry.value
+        registry[FinFetcherThumbnailGuardPP.__name__] = FinFetcherThumbnailGuardPP
+
+        key = FinFetcherThumbnailGuardPP.pp_key()
+        if ytdlp_pps.get_postprocessor(key) is FinFetcherThumbnailGuardPP:
+            return key
+    except Exception:
+        pass
+    return None
+
+
+THUMBNAIL_GUARD_KEY = _register_thumbnail_guard()
 
 
 def _is_partial_download_refusal(error_payload):
@@ -1972,7 +2364,8 @@ def apply_media_opts(ydl_opts, settings, mode, save_path, fast_trim=False):
     The post-processor chain is built in the same order yt-dlp's own CLI
     builds it (get_postprocessors in yt_dlp/__init__.py): SponsorBlock,
     FFmpegExtractAudio, FFmpegEmbedSubtitle, ModifyChapters, FFmpegMetadata,
-    EmbedThumbnail, FFmpegSplitChapters. That order is load-bearing, not
+    EmbedThumbnail (with this app's thumbnail guard directly in front of it),
+    FFmpegSplitChapters. That order is load-bearing, not
     cosmetic — ModifyChapters physically cuts the file, so a cover image or a
     chapter list written before it would describe timings that no longer
     exist, and subtitles have to be inside the container before it cuts.
@@ -1980,7 +2373,10 @@ def apply_media_opts(ydl_opts, settings, mode, save_path, fast_trim=False):
     Whatever the mode-specific block already put in ydl_opts (the audio
     extraction) keeps its own slot in that sequence.
     """
-    # The extension the file will have by the time the post-processors run
+    # The extension the file is meant to end up with. Exact in audio mode, where
+    # FFmpegExtractAudio forces it to the chosen codec; only a preference in
+    # video mode, where a download that falls back to a single progressive
+    # format keeps that format's own extension instead.
     target_ext = settings['audio_format'] if mode == 'audio' else settings['container']
 
     if settings['subtitles_enabled']:
@@ -1989,9 +2385,11 @@ def apply_media_opts(ydl_opts, settings, mode, save_path, fast_trim=False):
         ydl_opts['subtitleslangs'] = [lang for lang in settings['subtitle_langs'].split(',') if lang]
 
     # SponsorBlock reads an empty category list as "every category", so an
-    # enabled toggle with nothing ticked has to count as off. On a trimmed
-    # download its segment times address the untrimmed timeline, so it would
-    # cut the wrong parts out of the clip.
+    # enabled toggle with nothing ticked has to count as off. AppSettings._settle
+    # keeps that state from being stored at all, so this is the guard for a
+    # caller that assembled its settings by hand rather than a live case. On a
+    # trimmed download its segment times address the untrimmed timeline, so it
+    # would cut the wrong parts out of the clip.
     sponsor_categories = (settings['sponsorblock_categories']
                           if settings['sponsorblock_enabled'] and not fast_trim else [])
 
@@ -2000,6 +2398,11 @@ def apply_media_opts(ydl_opts, settings, mode, save_path, fast_trim=False):
     embed_chapters = settings['embed_chapters'] and not fast_trim
     split_chapters = settings['split_chapters'] and not fast_trim
 
+    # Two checks, because they answer different questions. This one is about the
+    # container the user asked for: a webm or a wav can never carry a cover, so
+    # there is no sense fetching an image for one. What it cannot answer is what
+    # the file will actually be — see FinFetcherThumbnailGuardPP, which is added
+    # to the chain below and settles that with the file in hand.
     embed_thumbnail = settings['embed_thumbnail'] and target_ext in EMBEDDABLE_THUMBNAIL_EXTS
     if embed_thumbnail:
         # The image has to be on disk before EmbedThumbnail can read it
@@ -2043,6 +2446,10 @@ def apply_media_opts(ydl_opts, settings, mode, save_path, fast_trim=False):
             'add_infojson': False,
         })
     if embed_thumbnail:
+        if THUMBNAIL_GUARD_KEY:
+            # Immediately in front, so it sees exactly the file EmbedThumbnail
+            # is about to be handed
+            postprocessors.append({'key': THUMBNAIL_GUARD_KEY})
         postprocessors.append({
             'key': 'EmbedThumbnail',
             # False deletes the downloaded image once it is embedded
@@ -2156,15 +2563,31 @@ def _terminate_process(proc):
         pass
 
 
-def _cleanup_download_scraps(save_path, seen_files, cancelled=False):
+# The markers yt-dlp's post-processors splice in front of a file's extension
+# via prepend_extension, giving "<stem>.<marker>.<ext>" beside the real file.
+# Each one is renamed away or deleted on a clean run, so any that survive
+# belong to a run that was cancelled or failed part way through:
+#   temp            the working copy nearly every ffmpeg post-processor writes
+#                   (ExtractAudio, EmbedSubtitle, Metadata, EmbedThumbnail,
+#                   Fixup, ModifyChapters — yt_dlp/postprocessor/ffmpeg.py and
+#                   modify_chapters.py:315)
+#   keyframes.temp  the keyframe re-encode FFmpegPostProcessor.force_keyframes
+#                   makes (ffmpeg.py:389-397)
+#   uncut           the original ModifyChapters sets aside before it swaps the
+#                   cut version into place (modify_chapters.py:69-73)
+#   orig            the pre-conversion audio ExtractAudio sets aside when the
+#                   output keeps the same name (ffmpeg.py:515-516)
+POSTPROCESSOR_SCRAP_MARKERS = ('temp', 'keyframes.temp', 'uncut', 'orig')
+
+
+def _cleanup_download_scraps(save_path, seen_files, cancelled=False, since=None):
     """Delete the temp files a finished or failed download can leave behind.
 
     Two kinds, both named after the file that was being written:
-      - "<stem>.keyframes.temp.<ext>", the keyframe re-encode that
-        FFmpegPostProcessor.force_keyframes makes (yt_dlp/postprocessor/
-        ffmpeg.py:389-397, reached from ModifyChapters and
-        FFmpegSplitChapters). yt-dlp deletes it itself, but that delete fails
-        on Windows while ffmpeg still holds the handle.
+      - "<stem>.<marker>.<ext>" for every marker in
+        POSTPROCESSOR_SCRAP_MARKERS. yt-dlp cleans these up itself on the way
+        out, but a cancel stops the chain between stages, and on Windows even
+        its own delete fails while ffmpeg still holds the handle.
       - "<name>.part" and its "-FragN" pieces, the in-progress files
         FileDownloader.temp_name gives a download (yt_dlp/downloader/
         common.py:217-222).
@@ -2174,6 +2597,12 @@ def _cleanup_download_scraps(save_path, seen_files, cancelled=False):
     attributed to this download is somebody else's file and is left alone.
     The files the download produced are skipped too, in case a video is
     genuinely titled like one of these temp names.
+
+    since (a time.time() from before the download began) is the last of those
+    guards: a file older than the run cannot have come from it, whatever it is
+    called. "Video.orig.mp4" is a name a person might well have chosen, and it
+    only becomes ours if this run is what wrote it. Two seconds of slack because
+    FAT-family filesystems store mtimes to that resolution.
 
     cancelled widens that last exemption: a run stopped part-way through
     post-processing leaves its output under the name the finished file would
@@ -2213,12 +2642,20 @@ def _cleanup_download_scraps(save_path, seen_files, cancelled=False):
         target = os.path.join(folder, entry)
         if not os.path.isfile(target):
             continue
+        if since is not None:
+            try:
+                if os.path.getmtime(target) < since - 2:
+                    continue  # predates this download, so it is not ours
+            except OSError:
+                continue
         if target in produced:
             if not cancelled:
                 continue
         else:
             is_scrap = (any(entry.startswith(f'{name}.part') for name in names)
-                        or any(entry.startswith(f'{stem}.keyframes.temp.') for stem in stems))
+                        or any(entry.startswith(f'{stem}.{marker}.')
+                               for stem in stems
+                               for marker in POSTPROCESSOR_SCRAP_MARKERS))
             if not is_scrap:
                 continue
 
@@ -2243,19 +2680,24 @@ class DownloadJob:
     work is happening on the download thread and inside a child process, so
     both handles have to live somewhere all three can reach.
 
-    yt-dlp itself only needs the flag: raising DownloadCancelled from a hook
-    stops it, because YoutubeDL re-raises that exception rather than retrying
-    it (_handle_extraction_exceptions, YoutubeDL.py:1699) and lets it out of
-    download() (__download_wrapper, :3648). ffmpeg is a separate process that
-    never sees the flag, so its Popen is kept here to be killed directly — an
-    ffmpeg left running is exactly what held the handle on the leftover file
-    the user could not delete.
+    yt-dlp itself only needs the flag for a plain download: raising
+    DownloadCancelled from a hook stops it, because YoutubeDL re-raises that
+    exception rather than retrying it (_handle_extraction_exceptions,
+    YoutubeDL.py:1699) and lets it out of download() (__download_wrapper,
+    :3648). ffmpeg is a separate process that never sees the flag, so its Popen
+    is kept here to be killed directly — an ffmpeg left running is exactly what
+    held the handle on the leftover file the user could not delete.
+
+    More than one process can be tracked at a time because they come from two
+    places: the trim this app spawns itself, and the one yt-dlp spawns for a
+    ranged download (see _install_ytdlp_child_hook). Those two never overlap
+    today, but a single slot would silently drop one if they ever did.
     """
 
     def __init__(self):
         self._cancelled = threading.Event()
         self._lock = threading.Lock()
-        self._process = None
+        self._processes = []
 
     def is_cancelled(self):
         return self._cancelled.is_set()
@@ -2263,7 +2705,7 @@ class DownloadJob:
     def cancel(self):
         """Ask this download to stop. Safe to call from any thread."""
         self._cancelled.set()
-        self._stop_process()
+        self._stop_processes()
 
     def attach_process(self, proc):
         """Track a child process so a cancel can reach it.
@@ -2272,21 +2714,114 @@ class DownloadJob:
         effect here as well, or that child would outlive the download that
         owns it — which is the whole point of tracking it.
         """
+        if proc is None:
+            return
         with self._lock:
-            self._process = proc
+            if proc not in self._processes:
+                self._processes.append(proc)
         if self.is_cancelled():
-            self._stop_process()
+            self._stop_processes()
 
     def detach_process(self, proc):
         """Stop tracking a process the caller is taking responsibility for."""
         with self._lock:
-            if self._process is proc:
-                self._process = None
+            if proc in self._processes:
+                self._processes.remove(proc)
 
-    def _stop_process(self):
+    def _stop_processes(self):
         with self._lock:
-            proc = self._process
-        _terminate_process(proc)
+            processes = list(self._processes)
+        for proc in processes:
+            _terminate_process(proc)
+
+
+# The download thread's claim on whatever yt-dlp spawns while it runs. Thread
+# local rather than global because it is set on exactly the thread that calls
+# into yt-dlp, so nothing else can accidentally adopt a stray process.
+_ytdlp_child = threading.local()
+
+
+def _ffmpeg_output_path(args):
+    """The file an ffmpeg command line writes to, or None.
+
+    FFmpegFD appends the destination last, through
+    FFmpegPostProcessor._ffmpeg_filename_argument (yt_dlp/downloader/
+    external.py:632), which prefixes a local path with "file:" so ffmpeg cannot
+    mistake a drive letter for a protocol (yt_dlp/postprocessor/ffmpeg.py:
+    370-377). That destination is the ".part" file, and killing ffmpeg is the
+    only way this app ever learns of it: no progress hook fires for a download
+    that never finished, so without this the cleanup would have no name to
+    match and would leave the partial file behind.
+    """
+    if not isinstance(args, (list, tuple)) or not args:
+        return None
+    last = args[-1]
+    if not isinstance(last, str) or last == '-':
+        return None
+    if last.startswith(('http://', 'https://')):
+        return None  # a stream target, not a file of ours
+    return last[len('file:'):] if last.startswith('file:') else last
+
+
+def _install_ytdlp_child_hook():
+    """Make the ffmpeg yt-dlp spawns for a ranged download reachable by cancel.
+
+    A download with download_ranges set goes to FFmpegFD, whose _call_downloader
+    starts ffmpeg and then sits in proc.wait() until it is done
+    (yt_dlp/downloader/external.py:636-652). Nothing calls a progress hook in
+    the meantime — ExternalFD.real_download only reports progress once, after
+    the child has exited (external.py:60-73) — so the cancel flag those hooks
+    check is never read, and Cancel did nothing at all until the whole range had
+    been fetched. FFmpegFD.on_process_started, the one override point that is
+    handed the child, is only called when the output is piped
+    (external.py:636-638), which a download to a file never is. There is no
+    supported hook.
+
+    So the child is claimed where it is created. external.py binds Popen as a
+    module-level name and calls it unqualified, so replacing that one name with
+    a subclass registers every external-downloader process with the job running
+    it. This is deliberately the narrowest reach available: a constructor
+    signature is far more stable across yt-dlp versions than the body of
+    _call_downloader would be. It is still a private symbol, so a failure to
+    apply is caught and reported rather than assumed away — see the cancel
+    message in run_attempt, which says so when this returns False.
+    """
+    try:
+        from yt_dlp.downloader import external as ytdlp_external
+
+        if getattr(ytdlp_external.Popen, '_finfetcher_tracked', False):
+            # Already wrapped. A second wrapper would work but stack another
+            # subclass on the first, and main.pyw is imported more than once
+            # per process by the test harness.
+            return True
+
+        class _JobTrackedPopen(ytdlp_external.Popen):
+            """yt-dlp's Popen, handed to the download that caused it."""
+
+            _finfetcher_tracked = True
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                job = getattr(_ytdlp_child, 'job', None)
+                if job is not None:
+                    job.attach_process(self)
+                remember = getattr(_ytdlp_child, 'remember', None)
+                if remember is not None:
+                    # yt-dlp always passes the command line positionally; the
+                    # keyword form is only here so a caller that does not
+                    # cannot raise out of a download.
+                    command = args[0] if args else kwargs.get('args')
+                    remember(_ffmpeg_output_path(command))
+
+        ytdlp_external.Popen = _JobTrackedPopen
+        return True
+    except Exception:
+        return False
+
+
+# False means a ranged download cannot be interrupted, and the UI has to say so
+# instead of pretending the Cancel button did something.
+FFMPEG_DOWNLOAD_CANCELLABLE = _install_ytdlp_child_hook()
 
 
 # This app runs one download at a time, so the cancel endpoint only needs to
@@ -2313,6 +2848,17 @@ def _clear_current_download_job(job):
     with _download_job_lock:
         if _current_download_job is job:
             _current_download_job = None
+
+
+def is_download_running():
+    """True while a download is registered, i.e. anything is still being written.
+
+    The same registration the Cancel button acts on, so the answer is exactly
+    as accurate as cancelling is. Used by the update endpoint, which would
+    otherwise exit the process out from under a running download.
+    """
+    with _download_job_lock:
+        return _current_download_job is not None
 
 
 @app.route('/api/download/cancel', methods=['POST'])
@@ -2343,7 +2889,11 @@ def download():
     quality = data.get('quality', 'max')
     trim_start = data.get('trim_start')
     trim_end = data.get('trim_end')
-    
+
+    # Anything in the save folder older than this belongs to somebody else, so
+    # the leftover cleanup will not touch it however it is named.
+    run_started = time.time()
+
     if not url:
         return jsonify({'error': 'No URL provided'}), 400
 
@@ -2498,6 +3048,14 @@ def download():
     ydl_opts['postprocessor_hooks'] = [postprocessor_hook]
 
     def run_download_thread(opts):
+        # The ContextVar half of ffmpeg discovery is per-thread, and this is the
+        # thread that asks yt-dlp to choose a downloader.
+        ensure_ffmpeg_discoverable()
+        # Anything yt-dlp spawns from here on belongs to this job, and the file
+        # it writes to is a name the leftover cleanup needs. No teardown: each
+        # attempt gets a thread of its own, so this claim dies with it.
+        _ytdlp_child.job = job
+        _ytdlp_child.remember = remember_file
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
@@ -2566,10 +3124,15 @@ def download():
                 #    stop yt-dlp at the next chunk or post-processing stage,
                 #    which is immediate mid-download but has to wait out an
                 #    ffmpeg step that is already running, and silence there
-                #    reads as a hang.
+                #    reads as a hang. When the child hook did not apply, that
+                #    wait covers a ranged download in full, so say that instead
+                #    of implying the Cancel button reached it.
                 if job.is_cancelled() and not cancel_logged:
                     cancel_logged = True
-                    yield f"data: {json.dumps({'log': '> [FinFetcher] Cancelling — stopping the download...'})}\n\n"
+                    note = ('' if FFMPEG_DOWNLOAD_CANCELLABLE else
+                            ' A trimmed download is fetched by ffmpeg, which this'
+                            ' build cannot interrupt — it will have to finish first.')
+                    yield f"data: {json.dumps({'log': '> [FinFetcher] Cancelling — stopping the download...' + note})}\n\n"
 
                 # 3. Check if thread finished
                 if not t.is_alive() and msg_queue.empty():
@@ -2628,7 +3191,8 @@ def download():
             keep_output = (bool(download_success and final_file)
                            or download_type != 'single')
             for message in _cleanup_download_scraps(save_path, seen_files,
-                                                    cancelled=not keep_output):
+                                                    cancelled=not keep_output,
+                                                    since=run_started):
                 yield f"data: {json.dumps({'log': message})}\n\n"
             if download_success and final_file:
                 yield f"data: {json.dumps({'log': f'> [FinFetcher] The download itself had already finished, so {final_file} was kept.'})}\n\n"
@@ -2815,7 +3379,8 @@ def download():
             # Either way — finished, failed, or fell back — the run can have
             # left a keyframe re-encode or a .part file behind. The download
             # thread is done by now, so nothing still being written is at risk.
-            for message in _cleanup_download_scraps(save_path, seen_files):
+            for message in _cleanup_download_scraps(save_path, seen_files,
+                                                    since=run_started):
                 yield f"data: {json.dumps({'log': message})}\n\n"
 
             # Send final status
@@ -2847,7 +3412,8 @@ def download():
                 if not completed and not any(t.is_alive() for t in attempt_threads):
                     _cleanup_download_scraps(save_path, seen_files,
                                              cancelled=job.is_cancelled()
-                                             and download_type == 'single')
+                                             and download_type == 'single',
+                                             since=run_started)
 
         _set_current_download_job(job)
         return Flask.response_class(generate(), mimetype='text/event-stream')

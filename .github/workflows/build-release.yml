@@ -45,6 +45,13 @@ jobs:
             echo "IS_BETA=false" >> $GITHUB_OUTPUT
           fi
           echo "RELEASE_NAME=FinFetcher v$VERSION" >> $GITHUB_OUTPUT
+          # The tag is the authority for what this build IS. version.txt feeds the
+          # exe's version resource, the installer's AppVersion, and what the app
+          # reports to the updater — so tagging v1.2.5 without having bumped the
+          # file would ship a build calling itself 1.2.4, which then keeps being
+          # offered its own release as an update. Write the tag in and be sure.
+          printf '%s' "$VERSION" > version.txt
+          echo "version.txt is now: $(cat version.txt)"
 
       - name: Generate version resource
         run: python make_version_info.py version_info.txt
@@ -105,7 +112,21 @@ jobs:
         run: |
           & "$env:ISCC" "/DVersionNumeric=${{ steps.vernum.outputs.VERNUM }}" installer.iss
 
+      # A second, single-file build purely for people already running <=1.2.4.
+      # Their updater cannot be changed retroactively: it takes the FIRST asset
+      # whose name ends in .exe and moves it over its own executable. Handed the
+      # installer, it would turn the user's FinFetcher.exe into a setup program —
+      # the app would still end up installed, but their shortcuts would then
+      # point at an installer that reinstalls on every click. So the release also
+      # carries a plain exe for them, uploaded first so it is the one they take.
+      # Newer builds prefer the *setup*.exe (see _pick_exe_asset in main.pyw).
+      # Drop this once the old builds are gone.
+      - name: Build legacy single-file exe
+        run: |
+          python -m PyInstaller --onefile --windowed --noupx --version-file version_info.txt --name "FinFetcher" --distpath dist_legacy --workpath build_legacy --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "icon.ico;." --clean --noconfirm main.pyw
+
       - name: Create Release
+        id: release
         uses: softprops/action-gh-release@v1
         with:
           name: ${{ steps.version.outputs.RELEASE_NAME }}
@@ -114,17 +135,47 @@ jobs:
 
             🦭 A video & music downloader.
 
-            ### What's New
-            - See commit history for changes
-
             ### Installation
-            1. Download `FinFetcher-Setup.exe`
-            2. Run it - it installs for you alone, asks for no admin rights, and starts the app when it's done
-            3. Start downloading! 🎬🎵
+            **`FinFetcher-Setup.exe`** is the one you want. It installs for you alone,
+            asks for no admin rights, and starts the app when it's done.
 
-            Already have FinFetcher? Run the same installer over the top, or use Settings → Updates.
-          files: dist_installer/FinFetcher-Setup.exe
+            `FinFetcher.exe` is a single-file build kept only so that copies of
+            v1.2.4 and earlier can still update themselves. It works, but Windows
+            Defender and Chrome are more likely to warn about it — the installer is
+            what scores clean.
+
+            ### Already have FinFetcher?
+            Run `FinFetcher-Setup.exe` over the top. If you were using the loose
+            `FinFetcher.exe`, delete it afterwards: the installed copy lives in
+            `%LOCALAPPDATA%\Programs\FinFetcher` and is what shortcuts and updates
+            will use from now on.
           draft: false
           prerelease: ${{ steps.version.outputs.IS_BETA == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Uploaded in two steps rather than one "files:" list, because the order
+      # decides what every already-shipped client downloads: the GitHub API
+      # returns assets in the order they were created, and those clients take the
+      # first .exe they see. The legacy build must therefore go up first, and a
+      # single multi-file upload gives no such guarantee.
+      - name: Upload legacy exe first (older clients take the first .exe)
+        run: gh release upload "${{ github.ref_name }}" "dist_legacy/FinFetcher.exe" --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload the installer
+        run: gh release upload "${{ github.ref_name }}" "dist_installer/FinFetcher-Setup.exe" --clobber
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Confirm asset order
+        shell: bash
+        run: |
+          # If this ever prints the installer first, every <=1.2.4 client would
+          # swap the installer over its own exe. Fail the release instead.
+          FIRST=$(gh release view "${{ github.ref_name }}" --json assets --jq '[.assets[].name | select(endswith(".exe"))] | .[0]')
+          echo "first .exe asset: $FIRST"
+          test "$FIRST" = "FinFetcher.exe"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

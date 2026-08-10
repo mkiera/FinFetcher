@@ -861,7 +861,25 @@ function showReleasesMessage(listEl, message) {
     listEl.appendChild(messageEl);
 }
 
-function buildReleaseRow(label, badges, dateText) {
+// Why a release cannot be installed from in here, or null when it can be.
+//
+// is_installer comes from the backend's _is_installer_name and is false only
+// for the bare-exe builds up to 1.2.4: running one of those would launch the
+// old version out of the updates folder and change nothing, so apply_update
+// refuses it — after the whole download. The row has to say so first.
+//
+// Tested against false rather than falsiness on purpose: the alpha artifacts
+// endpoint sends an exe_asset with no is_installer key at all (the installer
+// is picked out of the zip after downloading), and those stay installable.
+function releaseBlockedReason(release) {
+    if (!release.exe_asset) return 'No download attached to this release.';
+    if (release.exe_asset.is_installer === false) {
+        return 'Predates the FinFetcher installer, so it cannot replace an installed copy. Install it from GitHub instead.';
+    }
+    return null;
+}
+
+function buildReleaseRow(label, badges, dateText, note) {
     const row = document.createElement('div');
     row.className = 'release-row';
 
@@ -886,6 +904,16 @@ function buildReleaseRow(label, badges, dateText) {
 
     row.appendChild(info);
     row.appendChild(dateEl);
+
+    // The reason travels with the row it explains — a badge alone would say
+    // that this one is different without saying what to do about it
+    if (note) {
+        const noteEl = document.createElement('div');
+        noteEl.className = 'release-note';
+        noteEl.textContent = note;
+        row.appendChild(noteEl);
+    }
+
     return row;
 }
 
@@ -977,15 +1005,21 @@ async function fetchReleases(channel) {
                 ? new Date(release.published_at).toLocaleDateString()
                 : '';
 
+            // The current version is already unselectable for its own reason,
+            // so it does not need one of these on top of the 'current' badge
+            const blocked = release.is_current ? null : releaseBlockedReason(release);
+
             const badges = [];
             if (release.is_current) badges.push({ text: 'current', className: 'current-badge' });
             if (release.prerelease) badges.push({ text: 'pre-release', className: 'pre-badge' });
+            if (blocked) badges.push({ text: 'manual install', className: 'blocked-badge' });
 
-            const row = buildReleaseRow(`v${release.version}`, badges, date);
+            const row = buildReleaseRow(`v${release.version}`, badges, date, blocked);
             if (release.is_current) row.classList.add('current');
+            if (blocked) row.classList.add('blocked');
             row.dataset.version = release.version;
 
-            if (!release.is_current && release.exe_asset) {
+            if (!release.is_current && !blocked) {
                 row.style.cursor = 'pointer';
                 row.addEventListener('click', () => selectRelease(release, row));
 
@@ -1118,9 +1152,19 @@ function showUpdateBanner(currentVersion, update) {
     const banner = document.getElementById('updateBanner');
     const versionInfo = document.getElementById('updateVersionInfo');
     const viewLink = document.getElementById('updateViewLink');
+    const installBtn = document.getElementById('updateInstallBtn');
+    const manualNote = document.getElementById('updateManualNote');
 
     versionInfo.textContent = `v${currentVersion} → v${update.version}${update.prerelease ? ' (pre-release)' : ''}`;
     viewLink.href = update.html_url;
+
+    // The check endpoint offers anything from 1.2.0 up, so the banner can land
+    // on a release self-update will refuse just as the list can. Take the
+    // button away rather than let it spend the download first — View on GitHub
+    // is still there, and is the route that actually works.
+    const manualOnly = !!releaseBlockedReason(update);
+    installBtn.classList.toggle('hidden', manualOnly);
+    manualNote.classList.toggle('hidden', !manualOnly);
 
     banner.classList.remove('hidden');
 }
@@ -1142,6 +1186,15 @@ function dismissUpdate() {
 async function startUpdate() {
     if (!pendingUpdate || !pendingUpdate.exe_asset) {
         alert('No update available to install.');
+        return;
+    }
+
+    // Backstop for both callers: the banner hides its button and the release
+    // list refuses to select these, but neither guard should be the only one
+    // standing between a click and a download that ends in a refusal.
+    const blocked = releaseBlockedReason(pendingUpdate);
+    if (blocked) {
+        alert(blocked);
         return;
     }
 
@@ -1329,7 +1382,14 @@ function setSubgroupEnabled(id, enabled) {
 
 function updateMediaDependencies() {
     setSubgroupEnabled('subtitleOptions', document.getElementById('subtitlesToggle').checked);
-    setSubgroupEnabled('sponsorblockOptions', document.getElementById('sponsorblockToggle').checked);
+
+    // SponsorBlock reads an empty category list as "every category", so the
+    // backend has to treat "on with nothing ticked" as off — leaving a toggle
+    // that is visibly on and removes nothing. Say which it is.
+    const sponsorblockOn = document.getElementById('sponsorblockToggle').checked;
+    setSubgroupEnabled('sponsorblockOptions', sponsorblockOn);
+    document.getElementById('sponsorblockWarning').classList.toggle(
+        'hidden', !sponsorblockOn || readSponsorblockCategories().length > 0);
 
     // flac and wav are lossless, so yt-dlp's quality setting has nothing to act on
     const audioFormat = document.getElementById('audioFormatSelect').value;
@@ -1348,6 +1408,7 @@ function applyDownloadSettings(settings) {
     document.getElementById('rateLimitKbps').value = clampInt(settings.rate_limit_kbps, 0, Infinity, 0);
     document.getElementById('downloadArchiveToggle').checked = settings.use_download_archive !== false;
     document.getElementById('preciseTrimToggle').checked = settings.precise_trim === true;
+    document.getElementById('logToggle').checked = settings.log_to_file === true;
 
     setSelectValue(document.getElementById('containerSelect'), settings.container, 'mp4');
     setSelectValue(document.getElementById('audioFormatSelect'), settings.audio_format, 'mp3');
@@ -1431,6 +1492,7 @@ async function saveDownloadSettings() {
         rate_limit_kbps: clampInt(document.getElementById('rateLimitKbps').value, 0, Infinity, 0),
         use_download_archive: document.getElementById('downloadArchiveToggle').checked,
         precise_trim: document.getElementById('preciseTrimToggle').checked,
+        log_to_file: document.getElementById('logToggle').checked,
         container: document.getElementById('containerSelect').value,
         audio_format: document.getElementById('audioFormatSelect').value,
         audio_quality: document.getElementById('audioQualitySelect').value,

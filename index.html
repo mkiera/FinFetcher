@@ -86,11 +86,16 @@
                 <div class="update-banner-text">
                     <span class="update-badge">Update Available</span>
                     <span id="updateVersionInfo">v1.0.0 → v1.1.0</span>
+                    <!-- Shown instead of Update Now when the release carries no
+                         installer, which self-update refuses — see showUpdateBanner() -->
+                    <span id="updateManualNote" class="update-manual-note hidden">Installer not available — update
+                        from GitHub</span>
                 </div>
                 <div class="update-banner-actions">
                     <a id="updateViewLink" href="#" target="_blank" class="update-link">View on GitHub</a>
                     <button class="update-btn-skip" onclick="dismissUpdate()">Skip</button>
-                    <button class="update-btn-install" onclick="startUpdate()">Update Now</button>
+                    <button id="updateInstallBtn" class="update-btn-install" onclick="startUpdate()">Update
+                        Now</button>
                 </div>
             </div>
         </div>
@@ -374,17 +379,6 @@
 
                 <div class="toggle-row">
                     <div class="settings-label">
-                        <span>Log to File</span>
-                        <span class="settings-hint">Writes download_log.txt beside the downloaded files.</span>
-                    </div>
-                    <label class="switch small">
-                        <input type="checkbox" id="logToggle">
-                        <span class="slider round"></span>
-                    </label>
-                </div>
-
-                <div class="toggle-row">
-                    <div class="settings-label">
                         <span>Use download archive</span>
                         <span class="settings-hint">Skips playlist items you have already downloaded before.</span>
                     </div>
@@ -553,6 +547,12 @@
                             <span>Non-music</span>
                         </label>
                     </div>
+
+                    <!-- An enabled toggle with no categories ticked removes nothing
+                         at all, and used to look identical to a working one -->
+                    <div id="sponsorblockWarning" class="settings-warning hidden">
+                        Nothing ticked — no segments will be removed. Pick at least one category.
+                    </div>
                 </div>
 
                 <div class="settings-divider"></div>
@@ -600,6 +600,28 @@
                     </div>
                     <label class="switch small">
                         <input type="checkbox" id="splitChaptersToggle" onchange="saveDownloadSettings()">
+                        <span class="slider round"></span>
+                    </label>
+                </div>
+
+                <div class="settings-divider"></div>
+
+                <!-- Kept apart from everything above it because it is the one
+                     control here that /api/settings does not store: it is read
+                     straight off the checkbox when a download starts. Sitting
+                     among the saved rows, it looked like it persisted too. -->
+                <h3 class="settings-subheading">This session
+                    <span class="settings-mode-tag settings-session-tag">Not saved</span>
+                </h3>
+
+                <div class="toggle-row">
+                    <div class="settings-label">
+                        <span>Log to File</span>
+                        <span class="settings-hint">Writes download_log.txt beside the downloaded files. Off again
+                            the next time FinFetcher starts.</span>
+                    </div>
+                    <label class="switch small">
+                        <input type="checkbox" id="logToggle" onchange="saveDownloadSettings()">
                         <span class="slider round"></span>
                     </label>
                 </div>

@@ -1189,6 +1189,13 @@ input:checked+.slider:before {
     color: rgba(255, 255, 255, 0.8);
 }
 
+/* Stands in for the Update Now button when the release has no installer to
+   run, so the banner never just goes quiet about what happened to it */
+.update-manual-note {
+    font-size: 0.75rem;
+    color: #ffb464;
+}
+
 .update-banner-actions {
     display: flex;
     align-items: center;
@@ -1467,6 +1474,22 @@ header {
     vertical-align: middle;
 }
 
+/* Same shape as .settings-mode-tag, but this one is a warning rather than a
+   label: it marks the one group in the panel that is not written to disk */
+.settings-session-tag {
+    background: rgba(255, 180, 100, 0.18);
+    color: #ffb464;
+}
+
+/* An option that is on but doing nothing. Amber rather than red — nothing has
+   failed, the setting just has no effect in its current state. */
+.settings-warning {
+    font-size: 0.72rem;
+    line-height: 1.35;
+    color: #ffb464;
+    margin-bottom: 14px;
+}
+
 /* Carries the greyed-out look only — the controls inside are disabled in JS */
 .settings-subgroup.disabled {
     opacity: 0.4;
@@ -1555,6 +1578,9 @@ input.settings-text {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    /* A blocked row carries its reason on a line of its own below the version
+       and the date, which is what the wrap is for */
+    flex-wrap: wrap;
     padding: 10px 14px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     transition: background 0.15s;
@@ -1575,6 +1601,30 @@ input.settings-text {
 
 .release-row.current {
     opacity: 0.5;
+}
+
+/* Dimmed like .current, because it is unselectable for the same practical
+   reason — but not so far that the note explaining why becomes hard to read */
+.release-row.blocked {
+    opacity: 0.65;
+    cursor: default;
+}
+
+.release-row.blocked:hover {
+    background: none;
+}
+
+.release-note {
+    flex-basis: 100%;
+    margin-top: 5px;
+    font-size: 0.7rem;
+    line-height: 1.35;
+    color: #ffb464;
+}
+
+.blocked-badge {
+    background: rgba(255, 180, 100, 0.2);
+    color: #ffb464;
 }
 
 .release-info {
