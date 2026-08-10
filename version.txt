@@ -1,1 +1,1 @@
-1.2.4f-installer
+1.2.4-beta
