@@ -9,11 +9,13 @@ echo.
 REM Read version from version.txt
 set /p VERSION=<version.txt
 
-REM Check for PyInstaller
+REM Check for PyInstaller. Installing the whole pinned build set rather than
+REM just PyInstaller, so a local build uses the same versions CI does — that is
+REM the point of pinning them.
 py -3.13 -m PyInstaller --version >nul 2>&1
 if errorlevel 1 (
-    echo [INFO] Installing PyInstaller...
-    py -3.13 -m pip install pyinstaller
+    echo [INFO] Installing the pinned build requirements...
+    py -3.13 -m pip install -r requirements-build.txt
 )
 
 set EXE_NAME=FinFetcher
@@ -47,6 +49,7 @@ py -3.13 -m PyInstaller --onedir --windowed --noupx --name %EXE_NAME% ^
     --add-data "version.txt;." ^
     --add-data "build_info.json;." ^
     --add-data "icon.ico;." ^
+    --add-data "fonts;fonts" ^
     --clean --noconfirm main.pyw
 
 if errorlevel 1 (

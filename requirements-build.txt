@@ -1,0 +1,17 @@
+# What it takes to BUILD FinFetcher, on top of what it takes to run it.
+# Nothing in here is shipped — PyInstaller reads the app, it is not part of it.
+#
+# Pinned for the same reason as the runtime set, and for one more: the
+# packaging is what antivirus scores. Getting from 6 detections to 0 on
+# VirusTotal came down to how the exe is built (--onedir, --noupx, a version
+# resource, then an installer), so a silent PyInstaller upgrade between the
+# beta and the release could undo that without a line of code changing.
+-r requirements.txt
+
+pyinstaller==6.22.0
+# PyInstaller's own dependencies, pinned so the build set resolves the same way
+altgraph==0.17.5
+packaging==26.3
+pefile==2024.8.26
+pyinstaller-hooks-contrib==2026.6
+pywin32-ctypes==0.2.3
