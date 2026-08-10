@@ -118,7 +118,8 @@ jobs:
       # installer, it would turn the user's FinFetcher.exe into a setup program —
       # the app would still end up installed, but their shortcuts would then
       # point at an installer that reinstalls on every click. So the release also
-      # carries a plain exe for them, uploaded first so it is the one they take.
+      # carries a plain exe for them, named FinFetcher-Legacy.exe so it sorts
+      # ahead of the installer and is therefore the one they take.
       # Newer builds prefer the *setup*.exe (see _pick_exe_asset in main.pyw).
       # Drop this once the old builds are gone.
       - name: Build legacy single-file exe
@@ -139,10 +140,10 @@ jobs:
             **`FinFetcher-Setup.exe`** is the one you want. It installs for you alone,
             asks for no admin rights, and starts the app when it's done.
 
-            `FinFetcher.exe` is a single-file build kept only so that copies of
-            v1.2.4 and earlier can still update themselves. It works, but Windows
-            Defender and Chrome are more likely to warn about it — the installer is
-            what scores clean.
+            `FinFetcher-Legacy.exe` is a single-file build kept only so that
+            copies of v1.2.4 and earlier can still update themselves. It works, but
+            Windows Defender and Chrome are more likely to warn about it — the
+            installer is what scores clean.
 
             ### Already have FinFetcher?
             Run `FinFetcher-Setup.exe` over the top. If you were using the loose
@@ -154,13 +155,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # Uploaded in two steps rather than one "files:" list, because the order
-      # decides what every already-shipped client downloads: the GitHub API
-      # returns assets in the order they were created, and those clients take the
-      # first .exe they see. The legacy build must therefore go up first, and a
-      # single multi-file upload gives no such guarantee.
-      - name: Upload legacy exe first (older clients take the first .exe)
-        run: gh release upload "${{ github.ref_name }}" "dist_legacy/FinFetcher.exe" --clobber
+      # The order these appear in decides what every already-shipped client
+      # downloads: those clients take the first .exe the API hands back. That
+      # order is BY NAME, not by upload time — measured, after a release where
+      # uploading the legacy exe first still listed the installer first, because
+      # "FinFetcher-Setup.exe" sorts before "FinFetcher.exe" ('-' is 0x2D, '.' is
+      # 0x2E). So the legacy build is named to sort first instead:
+      # FinFetcher-Legacy.exe < FinFetcher-Setup.exe. The step after these
+      # asserts it, because the protection rests entirely on that ordering.
+      - name: Upload the legacy exe (sorts first, so older clients take it)
+        run: |
+          mv dist_legacy/FinFetcher.exe dist_legacy/FinFetcher-Legacy.exe
+          gh release upload "${{ github.ref_name }}" "dist_legacy/FinFetcher-Legacy.exe" --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -176,6 +182,6 @@ jobs:
           # swap the installer over its own exe. Fail the release instead.
           FIRST=$(gh release view "${{ github.ref_name }}" --json assets --jq '[.assets[].name | select(endswith(".exe"))] | .[0]')
           echo "first .exe asset: $FIRST"
-          test "$FIRST" = "FinFetcher.exe"
+          test "$FIRST" = "FinFetcher-Legacy.exe"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
