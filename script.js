@@ -1024,14 +1024,27 @@ async function refreshReleases() {
 
 async function fetchReleases(channel) {
     const listEl = document.getElementById('releasesList');
-    showReleasesMessage(listEl, 'Loading releases...');
     selectedRelease = null;
     document.getElementById('installSelectedBtn').disabled = true;
     document.getElementById('installSelectedBtn').textContent = 'Update';
 
-    // Only meaningful for alpha; the other channels re-hide it on every switch
+    // Nothing visible changes until the new content is ready. Cached reads
+    // answer in milliseconds, and the old wipe-then-load flashed a placeholder
+    // between two full lists — one frame of collapsed panel on every tab
+    // switch. The placeholder still exists, but only appears when a fetch is
+    // slow enough that an unchanged list would read as the click not working.
+    const slowTimer = setTimeout(
+        () => showReleasesMessage(listEl, 'Loading releases...'), 400);
+
     const buildLineEl = document.getElementById('currentBuildLine');
-    if (buildLineEl && channel !== 'alpha') buildLineEl.classList.add('hidden');
+
+    // One paint: rows land together, then the default selection is applied
+    const swapIn = (rows, firstSelectable) => {
+        listEl.replaceChildren(...rows);
+        if (firstSelectable) {
+            selectRelease(firstSelectable.release, firstSelectable.row);
+        }
+    };
 
     try {
         // Alpha channel uses artifacts endpoint
@@ -1055,7 +1068,7 @@ async function fetchReleases(channel) {
             renderCheckedAt(data.fetched_at);
             renderCurrentBuildLine(data.current_build, data.current_version);
 
-            listEl.innerHTML = '';
+            const rows = [];
             let firstSelectable = null;
 
             data.artifacts.forEach(artifact => {
@@ -1092,12 +1105,10 @@ async function fetchReleases(channel) {
                     }
                 }
 
-                listEl.appendChild(row);
+                rows.push(row);
             });
 
-            if (firstSelectable) {
-                selectRelease(firstSelectable.release, firstSelectable.row);
-            }
+            swapIn(rows, firstSelectable);
             return;
         }
 
@@ -1120,8 +1131,11 @@ async function fetchReleases(channel) {
         if (footerVersion) footerVersion.textContent = `v${data.current_version}`;
 
         renderCheckedAt(data.fetched_at);
+        // The running-build line belongs to the Alpha tab alone; hidden here,
+        // in the same paint as the new rows, not up front where it snapped
+        if (buildLineEl) buildLineEl.classList.add('hidden');
 
-        listEl.innerHTML = '';
+        const rows = [];
         let firstSelectable = null;
 
         data.releases.forEach(release => {
@@ -1153,16 +1167,16 @@ async function fetchReleases(channel) {
                 }
             }
 
-            listEl.appendChild(row);
+            rows.push(row);
         });
 
         // Auto-select the most recent selectable release
-        if (firstSelectable) {
-            selectRelease(firstSelectable.release, firstSelectable.row);
-        }
+        swapIn(rows, firstSelectable);
 
     } catch (e) {
         showReleasesMessage(listEl, `Failed to load: ${e.message}`);
+    } finally {
+        clearTimeout(slowTimer);
     }
 }
 
