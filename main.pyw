@@ -253,6 +253,122 @@ class FFmpegManager:
 ffmpeg_manager = FFmpegManager()
 
 
+class JsRuntimeManager:
+    """Finds — and if need be installs — a JavaScript runtime for yt-dlp.
+
+    YouTube's CDN rejects media requests whose URLs were built without solving
+    its JavaScript challenges: on 2026-08-14 every download 403'd, and enabling
+    a runtime was the entire fix (verified against the same yt-dlp version both
+    ways — no newer release existed to bump to). yt-dlp only looks for deno by
+    default, so a machine with node installed still counts as having no runtime
+    until it is passed in explicitly via js_runtimes.
+
+    Detection prefers a runtime that is already on the machine; the ~41 MB deno
+    download is the fallback for machines with nothing, fetched into the same
+    AppData folder ffmpeg lives in. Deno first in the returned dict — it is the
+    runtime yt-dlp's own tests run against.
+    """
+
+    DENO_URL = ('https://github.com/denoland/deno/releases/latest/download/'
+                'deno-x86_64-pc-windows-msvc.zip')
+
+    def __init__(self):
+        # One shot per app run: a failed 41 MB download must not be retried on
+        # every subsequent download click, most likely to fail the same way.
+        self._download_attempted = False
+
+    def get_deno_dir(self):
+        return os.path.join(FFmpegManager.get_app_data_dir(), 'deno')
+
+    def get_deno_path(self):
+        deno_name = 'deno.exe' if os.name == 'nt' else 'deno'
+        return os.path.join(self.get_deno_dir(), deno_name)
+
+    def detect(self):
+        """Every usable runtime, as the dict yt-dlp's js_runtimes option takes."""
+        runtimes = {}
+        if os.path.exists(self.get_deno_path()):
+            runtimes['deno'] = {'path': self.get_deno_path()}
+        for name in ('deno', 'node', 'bun'):
+            if name in runtimes:
+                continue
+            found = shutil.which(name)
+            if found:
+                runtimes[name] = {'path': found}
+        return runtimes
+
+    def any_available(self):
+        return bool(self.detect())
+
+    def describe(self):
+        """One line for the debug panel: what will actually be used."""
+        runtimes = self.detect()
+        if not runtimes:
+            return 'NONE - YouTube downloads will fail with HTTP 403'
+        return ', '.join(f'{name} ({cfg["path"]})' for name, cfg in runtimes.items())
+
+    def download_deno_iter(self):
+        """Download and unpack deno, yielding (percent, status) as it goes.
+
+        A generator rather than a callback so the download stream can forward
+        progress lines directly. Yields a final (100, 'done') on success;
+        raises nothing — a failure yields (0, message) and stops, because the
+        caller's download can still proceed (and fail with a clear 403) rather
+        than die on the setup step.
+        """
+        if self._download_attempted:
+            return
+        self._download_attempted = True
+        temp_dir = tempfile.mkdtemp()
+        zip_path = os.path.join(temp_dir, 'deno.zip')
+        try:
+            req = Request(self.DENO_URL, headers={'User-Agent': 'FinFetcher/1.0'})
+            with urlopen(req, timeout=60, context=get_ssl_context()) as response:
+                total = int(response.headers.get('Content-Length', 0))
+                got = 0
+                with open(zip_path, 'wb') as f:
+                    while True:
+                        chunk = response.read(1024 * 256)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        got += len(chunk)
+                        if total > 0:
+                            yield (int(got / total * 90),
+                                   f'Downloading Deno... {got / 1048576:.0f}/{total / 1048576:.0f} MB')
+
+            yield (95, 'Unpacking...')
+            os.makedirs(self.get_deno_dir(), exist_ok=True)
+            deno_name = os.path.basename(self.get_deno_path())
+            with zipfile.ZipFile(zip_path) as zf:
+                member = next((n for n in zf.namelist()
+                               if os.path.basename(n) == deno_name), None)
+                if member is None:
+                    yield (0, 'deno.exe was not in the downloaded archive')
+                    return
+                with zf.open(member) as src, open(self.get_deno_path(), 'wb') as dst:
+                    shutil.copyfileobj(src, dst)
+            yield (100, 'done')
+        except Exception as e:
+            yield (0, f'Deno download failed: {e}')
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+js_runtime_manager = JsRuntimeManager()
+
+
+def get_js_runtime_opts():
+    """The js_runtimes entry for a YoutubeDL options dict.
+
+    Empty when no runtime exists rather than raising: extraction still mostly
+    works without one, and the download route is where the missing runtime is
+    dealt with (see the deno install in download()).
+    """
+    runtimes = js_runtime_manager.detect()
+    return {'js_runtimes': runtimes} if runtimes else {}
+
+
 def get_ffmpeg_path():
     """Get the path to ffmpeg executable."""
     return ffmpeg_manager.get_ffmpeg_path()
@@ -1981,6 +2097,7 @@ def get_video_info(url, flat=True):
         'extract_flat': flat,
     }
     ydl_opts.update(get_cookie_opts())
+    ydl_opts.update(get_js_runtime_opts())
     
     result_holder = [None]
     error_holder = [None]
@@ -2154,6 +2271,10 @@ def get_debug_info():
     # Which CA store HTTPS verification uses — a missing certifi bundle
     # breaks downloads on machines whose OS store holds an expired root
     debug_info['dependencies']['CA store'] = get_ca_source()
+
+    # No runtime is the one condition that 403s every YouTube download, so the
+    # panel says it outright instead of listing a bare "none"
+    debug_info['dependencies']['JS runtime'] = js_runtime_manager.describe()
     
     # Check ffmpeg
     ffmpeg_exe = get_ffmpeg_path()
@@ -2185,6 +2306,7 @@ def run_debug_test():
         try:
             ydl_opts = {'quiet': True}
             ydl_opts.update(get_cookie_opts())
+            ydl_opts.update(get_js_runtime_opts())
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(test_url, download=False)
                 result_holder[0] = {
@@ -2238,6 +2360,7 @@ def get_stream_url():
             'format': 'best[ext=mp4]/best',  # Prefer mp4 for browser compatibility
         }
         ydl_opts.update(get_cookie_opts())
+        ydl_opts.update(get_js_runtime_opts())
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -3120,7 +3243,10 @@ def download():
         'noplaylist': True if download_type == 'single' else False,
     }
     ydl_opts.update(get_cookie_opts())
-    
+    # Set again just before the download runs (see generate()): the deno
+    # install that may happen there has to land in this dict.
+    ydl_opts.update(get_js_runtime_opts())
+
     # Set ffmpeg location if bundled
     if ffmpeg_dir:
         ydl_opts['ffmpeg_location'] = ffmpeg_dir
@@ -3280,8 +3406,16 @@ def download():
                 # Enriched here rather than at the yield, so the message the
                 # user reads and the message _is_partial_download_refusal
                 # matches on are the same string
-                result_queue.put({'success': False,
-                                  'error': describe_ffmpeg_failure(str(e))})
+                message = describe_ffmpeg_failure(str(e))
+                # The bare 403 says nothing about its usual cause. Only when
+                # no runtime exists — with one, a 403 really is the server
+                # refusing this video, and blaming the runtime would be wrong.
+                if ('HTTP Error 403' in message
+                        and not js_runtime_manager.any_available()):
+                    message += (' — YouTube refuses downloads made without a'
+                                ' JavaScript runtime, and none is installed.'
+                                ' Retry the download to set one up.')
+                result_queue.put({'success': False, 'error': message})
 
     # The threads the attempts run on. The download thread is a daemon and
     # keeps going if the stream is dropped, so the cleanup path needs a way to
@@ -3457,6 +3591,25 @@ def download():
                         ydl_opts.pop('download_ranges', None)
                         ydl_opts.pop('force_keyframes_at_cuts', None)
                         final_file, download_success, error_payload = yield from run_attempt(ydl_opts)
+
+            # Fresh tries when YouTube refuses a session's media URLs.
+            # Observed with the runtime demonstrably working ("Solving JS
+            # challenges using deno" in the same log): extraction succeeds,
+            # the download 403s, and an identical retry moments later
+            # completes — the URLs are session-bound and YouTube refuses some
+            # sessions outright. Retrying re-extracts, which mints a new one.
+            # Measured at roughly one refusal in three, so two retries take a
+            # download from ~67% to ~96% while an unlucky pair stays possible.
+            # Gated on a runtime being present because without one the 403 is
+            # deterministic (that is the bug this branch fixes), and retrying
+            # would just triple the wait for the same failure.
+            for _ in range(2):
+                if (download_success or job.is_cancelled()
+                        or 'HTTP Error 403' not in ((error_payload or {}).get('error') or '')
+                        or not js_runtime_manager.any_available()):
+                    break
+                yield f"data: {json.dumps({'log': '> [FinFetcher] YouTube refused that session — retrying with a fresh one...'})}\n\n"
+                final_file, download_success, error_payload = yield from run_attempt(ydl_opts)
 
             if error_payload:
                 yield f"data: {json.dumps(error_payload)}\n\n"
@@ -3652,6 +3805,28 @@ def download():
                 # with no log lines and no Cancel button for the entire
                 # download, which is indistinguishable from a freeze.
                 yield f"data: {json.dumps({'log': '> [FinFetcher] Preparing download...'})}\n\n"
+
+                # Without a JavaScript runtime, YouTube's CDN refuses the media
+                # request outright (HTTP 403) — yt-dlp needs one to solve the
+                # signature challenges. Machines with deno, node or bun already
+                # installed never reach this; everyone else gets deno once,
+                # into the same AppData folder ffmpeg went to. Failure is
+                # reported and the download still runs: other sites work
+                # without a runtime, and the 403 message now says what to fix.
+                if not js_runtime_manager.any_available():
+                    yield f"data: {json.dumps({'log': '> [FinFetcher] One-time setup: YouTube requires a JavaScript runtime, downloading Deno (~41 MB)...'})}\n\n"
+                    last_reported = -1
+                    for percent, status in js_runtime_manager.download_deno_iter():
+                        # Every ~10%, not every 256 KB chunk — plus the
+                        # terminal lines, which carry the actual outcome
+                        if percent - last_reported >= 10 or percent >= 95 or percent == 0:
+                            last_reported = percent
+                            yield f"data: {json.dumps({'log': '> [FinFetcher] ' + status})}\n\n"
+                    if js_runtime_manager.any_available():
+                        ydl_opts.update(get_js_runtime_opts())
+                        yield f"data: {json.dumps({'log': '> [FinFetcher] Deno installed — YouTube downloads will work from here on.'})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'log': '> [FinFetcher] Continuing without it — YouTube downloads may fail with HTTP 403 until a JavaScript runtime is available.'})}\n\n"
                 if fast_trim:
                     # Say so, rather than leaving the silence to be interpreted.
                     yield f"data: {json.dumps({'log': '> [FinFetcher] Trimming as it downloads — only the selected range is fetched, and ffmpeg reports no progress until it is done.'})}\n\n"

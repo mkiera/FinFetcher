@@ -28,6 +28,11 @@ yt-dlp==2026.7.4
 # cover art into opus/flac.
 certifi==2026.7.22
 mutagen==1.48.1
+# The JavaScript that solves YouTube's signature challenges, run by whichever
+# runtime JsRuntimeManager finds. Without this package yt-dlp fetches the
+# script from GitHub at run time — works, but makes the first download depend
+# on a fetch this pin makes deterministic.
+yt-dlp-ejs==0.8.0
 
 # --- pulled in by the above, pinned so the set resolves the same way ----
 # via flask
