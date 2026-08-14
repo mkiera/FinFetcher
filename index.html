@@ -333,7 +333,13 @@
                         onclick="switchUpdateTab('prerelease')">Pre-release</button>
                     <button class="settings-tab" data-channel="alpha"
                         onclick="switchUpdateTab('alpha')">Alpha</button>
+                    <!-- Forces a fresh fetch; every plain tab click reads the
+                         cache the hourly check maintains -->
+                    <button class="refresh-releases-btn" id="refreshReleasesBtn"
+                        title="Check GitHub for new versions now"
+                        onclick="refreshReleases()">&#x21bb;</button>
                 </div>
+                <div id="releasesCheckedAt" class="releases-checked-at"></div>
 
                 <!-- Which build this copy actually is. Only the Alpha tab fills
                      it in: there, every row shares one version string and the

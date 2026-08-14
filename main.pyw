@@ -760,12 +760,15 @@ class UpdateManager:
         self._record_check()
 
         try:
-            req = Request(self.GITHUB_API_URL, headers={
-                'User-Agent': 'FinFetcher-Updater/1.0',
-                'Accept': 'application/vnd.github.v3+json',
-            })
-            with urlopen(req, timeout=15, context=get_ssl_context()) as response:
-                releases = json.loads(response.read().decode('utf-8'))
+            # Through the cache with refresh, so the one fetch serves both this
+            # check and every tab the user opens until the next one. The alpha
+            # list rides along: it is the same freshness the user just asked
+            # for, and its own failure must not break the release check.
+            releases = release_cache.get_releases(refresh=True)
+            try:
+                release_cache.get_artifacts(refresh=True)
+            except Exception:
+                pass
 
             if not releases:
                 return None
@@ -1177,6 +1180,93 @@ class UpdateManager:
 
 # Global UpdateManager instance
 update_manager = UpdateManager()
+
+
+class ReleaseCache:
+    """The GitHub release and artifact lists, fetched once and reused.
+
+    Before this, every click on a channel tab hit GitHub live — the Alpha tab
+    worst of all, at one request per workflow run plus one per version.txt.
+    Now the lists are fetched by the update checks (launch, the hourly timer,
+    the refresh button) and every read between checks is served from here, so
+    tabs render instantly and the unauthenticated rate limit stops being spent
+    on browsing.
+
+    A refresh that fails keeps the previous data: a list from an hour ago
+    beats an error, and the next successful check replaces it anyway. The
+    lock is because Flask serves each request on its own thread, and an
+    hourly refresh can land mid-click.
+    """
+
+    # Even a forced refresh serves the cache when the data is younger than
+    # this. GitHub allows 60 unauthenticated requests an hour per address, and
+    # the alpha list alone costs several — a mashed refresh button or a
+    # launch-check racing a panel-open would spend the budget on data that
+    # cannot have changed. A minute is far below any human "is it out yet"
+    # cadence and still an eternity to a rate limiter.
+    REFRESH_FLOOR_SECONDS = 60
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._releases = None
+        self._artifacts = None
+        self._fetched_at = None
+        self._stamps = {'_releases': 0.0, '_artifacts': 0.0}
+
+    def fetched_at_iso(self):
+        with self._lock:
+            stamp = self._fetched_at
+        if stamp is None:
+            return None
+        from datetime import datetime
+        return datetime.fromtimestamp(stamp).isoformat()
+
+    def _remember(self, field, value):
+        with self._lock:
+            setattr(self, field, value)
+            self._stamps[field] = self._fetched_at = time.time()
+
+    def _fresh_enough(self, field):
+        with self._lock:
+            return time.time() - self._stamps[field] < self.REFRESH_FLOOR_SECONDS
+
+    def get_releases(self, refresh=False):
+        """The raw GitHub releases list, from cache unless refresh or empty."""
+        with self._lock:
+            cached = self._releases
+        if cached is not None and (not refresh or self._fresh_enough('_releases')):
+            return cached
+        try:
+            req = Request(update_manager.GITHUB_API_URL, headers={
+                'User-Agent': 'FinFetcher-Updater/1.0',
+                'Accept': 'application/vnd.github.v3+json',
+            })
+            with urlopen(req, timeout=15, context=get_ssl_context()) as response:
+                fresh = json.loads(response.read().decode('utf-8'))
+        except Exception:
+            if cached is not None:
+                return cached  # stale beats broken
+            raise
+        self._remember('_releases', fresh)
+        return fresh
+
+    def get_artifacts(self, refresh=False):
+        """The built alpha rows, from cache unless refresh or empty."""
+        with self._lock:
+            cached = self._artifacts
+        if cached is not None and (not refresh or self._fresh_enough('_artifacts')):
+            return cached
+        try:
+            fresh = _build_alpha_artifacts()
+        except Exception:
+            if cached is not None:
+                return cached
+            raise
+        self._remember('_artifacts', fresh)
+        return fresh
+
+
+release_cache = ReleaseCache()
 
 
 # ============ App Settings ============
@@ -1730,12 +1820,7 @@ def update_releases():
     current_version = update_manager.get_current_version()
 
     try:
-        req = Request(update_manager.GITHUB_API_URL, headers={
-            'User-Agent': 'FinFetcher-Updater/1.0',
-            'Accept': 'application/vnd.github.v3+json',
-        })
-        with urlopen(req, timeout=15, context=get_ssl_context()) as response:
-            releases = json.loads(response.read().decode('utf-8'))
+        releases = release_cache.get_releases()
 
         result = []
         for release in releases:
@@ -1779,140 +1864,150 @@ def update_releases():
         return jsonify({
             'releases': result,
             'current_version': current_version,
+            'fetched_at': release_cache.fetched_at_iso(),
         })
 
     except Exception as e:
         return jsonify({'error': str(e), 'releases': [], 'current_version': current_version})
 
 
-@app.route('/api/update/artifacts', methods=['GET'])
-def update_artifacts():
-    """List recent CI build artifacts from GitHub Actions.
-    
+def _build_alpha_artifacts():
+    """Build the alpha rows from GitHub Actions. One call per workflow run
+    plus one per version.txt, which is why this runs behind ReleaseCache
+    rather than per tab click. Raises on failure; the cache decides whether
+    stale data can stand in.
+
     Uses the public GitHub API to list successful workflow runs,
     and constructs nightly.link URLs for unauthenticated download.
     """
     current_version = update_manager.get_current_version()
     build_info = update_manager.get_build_info()
-    try:
-        # Fetch recent successful runs from the build-test workflow
-        api_url = (
-            'https://api.github.com/repos/mkiera/FinFetcher/actions/runs'
-            '?status=success&per_page=20'
+    # Fetch recent successful runs from the build-test workflow
+    api_url = (
+        'https://api.github.com/repos/mkiera/FinFetcher/actions/runs'
+        '?status=success&per_page=20'
+    )
+    req = Request(api_url, headers={
+        'User-Agent': 'FinFetcher-Updater/1.0',
+        'Accept': 'application/vnd.github.v3+json',
+    })
+    with urlopen(req, timeout=15, context=get_ssl_context()) as response:
+        data = json.loads(response.read().decode('utf-8'))
+
+    result = []
+    seen_branches = set()
+    for run in data.get('workflow_runs', []):
+        branch = run.get('head_branch', '')
+        run_id = run.get('id')
+        sha = run.get('head_sha', '')[:7]
+        workflow_name = run.get('name', '')
+
+        # Only include build-test runs (not release builds)
+        if workflow_name != 'Build Test':
+            continue
+
+        # Show only the latest run per branch
+        if branch in seen_branches:
+            continue
+        seen_branches.add(branch)
+
+        # Construct nightly.link download URL
+        # Format: https://nightly.link/owner/repo/actions/runs/{run_id}/{artifact_name}.zip
+        # The artifact name from build-test.yml is normally FinFetcher_{branch_suffix},
+        # but a workflow_dispatch run names it after the build_name input —
+        # so ask GitHub for the real name and only guess if that fails.
+        branch_suffix = branch
+        for prefix in ('feature/', 'bugfix/'):
+            if branch_suffix.startswith(prefix):
+                branch_suffix = branch_suffix[len(prefix):]
+                break
+        artifact_name = f'FinFetcher_{branch_suffix}'
+        try:
+            art_req = Request(
+                f'https://api.github.com/repos/mkiera/FinFetcher/actions/runs/{run_id}/artifacts',
+                headers={
+                    'User-Agent': 'FinFetcher-Updater/1.0',
+                    'Accept': 'application/vnd.github.v3+json',
+                })
+            with urlopen(art_req, timeout=5, context=get_ssl_context()) as art_resp:
+                artifacts = json.loads(art_resp.read().decode('utf-8')).get('artifacts', [])
+            live = [a for a in artifacts if not a.get('expired')]
+            if not live:
+                # build-test.yml keeps artifacts for 30 days, but the run
+                # itself lives in the Actions history forever — which is also
+                # why branches that were deleted long ago still appear here.
+                # Listing a build whose file is gone only offers the user a
+                # download that 404s, so drop it.
+                continue
+            artifact_name = live[0].get('name', artifact_name)
+        except Exception:
+            # Could not ask — rate limited, offline. That is not evidence the
+            # artifact is gone, so keep the row rather than hiding a build
+            # that may well be downloadable.
+            pass
+        download_url = f'https://nightly.link/mkiera/FinFetcher/actions/runs/{run_id}/{artifact_name}.zip'
+
+        # Fetch version.txt from this commit
+        version = ''
+        try:
+            ver_url = f'https://raw.githubusercontent.com/mkiera/FinFetcher/{run.get("head_sha", "")}/version.txt'
+            ver_req = Request(ver_url, headers={'User-Agent': 'FinFetcher-Updater/1.0'})
+            with urlopen(ver_req, timeout=5, context=get_ssl_context()) as ver_resp:
+                version = ver_resp.read().decode('utf-8').strip()
+        except Exception:
+            pass
+
+        # Run id first: a branch can be rebuilt at the same commit, and the
+        # run is what the installed copy actually came out of. Commit is the
+        # fallback for a build stamped before run ids were recorded.
+        stamped_run = build_info.get('run_id')
+        stamped_sha = (build_info.get('sha') or '')[:7]
+        is_current = bool(
+            (stamped_run and str(stamped_run) == str(run_id))
+            or (stamped_sha and stamped_sha == sha)
         )
-        req = Request(api_url, headers={
-            'User-Agent': 'FinFetcher-Updater/1.0',
-            'Accept': 'application/vnd.github.v3+json',
-        })
-        with urlopen(req, timeout=15, context=get_ssl_context()) as response:
-            data = json.loads(response.read().decode('utf-8'))
 
-        result = []
-        seen_branches = set()
-        for run in data.get('workflow_runs', []):
-            branch = run.get('head_branch', '')
-            run_id = run.get('id')
-            sha = run.get('head_sha', '')[:7]
-            workflow_name = run.get('name', '')
-
-            # Only include build-test runs (not release builds)
-            if workflow_name != 'Build Test':
-                continue
-
-            # Show only the latest run per branch
-            if branch in seen_branches:
-                continue
-            seen_branches.add(branch)
-
-            # Construct nightly.link download URL
-            # Format: https://nightly.link/owner/repo/actions/runs/{run_id}/{artifact_name}.zip
-            # The artifact name from build-test.yml is normally FinFetcher_{branch_suffix},
-            # but a workflow_dispatch run names it after the build_name input —
-            # so ask GitHub for the real name and only guess if that fails.
-            branch_suffix = branch
-            for prefix in ('feature/', 'bugfix/'):
-                if branch_suffix.startswith(prefix):
-                    branch_suffix = branch_suffix[len(prefix):]
-                    break
-            artifact_name = f'FinFetcher_{branch_suffix}'
-            try:
-                art_req = Request(
-                    f'https://api.github.com/repos/mkiera/FinFetcher/actions/runs/{run_id}/artifacts',
-                    headers={
-                        'User-Agent': 'FinFetcher-Updater/1.0',
-                        'Accept': 'application/vnd.github.v3+json',
-                    })
-                with urlopen(art_req, timeout=5, context=get_ssl_context()) as art_resp:
-                    artifacts = json.loads(art_resp.read().decode('utf-8')).get('artifacts', [])
-                live = [a for a in artifacts if not a.get('expired')]
-                if not live:
-                    # build-test.yml keeps artifacts for 30 days, but the run
-                    # itself lives in the Actions history forever — which is also
-                    # why branches that were deleted long ago still appear here.
-                    # Listing a build whose file is gone only offers the user a
-                    # download that 404s, so drop it.
-                    continue
-                artifact_name = live[0].get('name', artifact_name)
-            except Exception:
-                # Could not ask — rate limited, offline. That is not evidence the
-                # artifact is gone, so keep the row rather than hiding a build
-                # that may well be downloadable.
-                pass
-            download_url = f'https://nightly.link/mkiera/FinFetcher/actions/runs/{run_id}/{artifact_name}.zip'
-
-            # Fetch version.txt from this commit
-            version = ''
-            try:
-                ver_url = f'https://raw.githubusercontent.com/mkiera/FinFetcher/{run.get("head_sha", "")}/version.txt'
-                ver_req = Request(ver_url, headers={'User-Agent': 'FinFetcher-Updater/1.0'})
-                with urlopen(ver_req, timeout=5, context=get_ssl_context()) as ver_resp:
-                    version = ver_resp.read().decode('utf-8').strip()
-            except Exception:
-                pass
-
-            # Run id first: a branch can be rebuilt at the same commit, and the
-            # run is what the installed copy actually came out of. Commit is the
-            # fallback for a build stamped before run ids were recorded.
-            stamped_run = build_info.get('run_id')
-            stamped_sha = (build_info.get('sha') or '')[:7]
-            is_current = bool(
-                (stamped_run and str(stamped_run) == str(run_id))
-                or (stamped_sha and stamped_sha == sha)
-            )
-
-            result.append({
-                'branch': branch,
-                'sha': sha,
-                'version': version,
-                'run_id': run_id,
-                'is_current': is_current,
-                'artifact_name': artifact_name,
-                'published_at': run.get('created_at', ''),
-                'html_url': run.get('html_url', ''),
-                'exe_asset': {
-                    'name': f'{artifact_name}.zip',
-                    'url': download_url,
-                    'size': 0,  # Unknown until download
-                    # What is inside the zip decides whether self-update can use
-                    # it, and the name is the only way to know before
-                    # downloading: build-test.yml uploads the installer as
-                    # FinFetcher-Setup_<branch>, while every run from before the
-                    # installer existed uploaded a bare exe as
-                    # FinFetcher_<branch>. Those runs stay in the Actions
-                    # history for good, so this stays true for good.
-                    'is_installer': 'setup' in artifact_name.lower(),
-                },
-            })
-
-        return jsonify({
-            'artifacts': result,
-            'current_version': current_version,
-            'current_build': build_info,
+        result.append({
+            'branch': branch,
+            'sha': sha,
+            'version': version,
+            'run_id': run_id,
+            'is_current': is_current,
+            'artifact_name': artifact_name,
+            'published_at': run.get('created_at', ''),
+            'html_url': run.get('html_url', ''),
+            'exe_asset': {
+                'name': f'{artifact_name}.zip',
+                'url': download_url,
+                'size': 0,  # Unknown until download
+                # What is inside the zip decides whether self-update can use
+                # it, and the name is the only way to know before
+                # downloading: build-test.yml uploads the installer as
+                # FinFetcher-Setup_<branch>, while every run from before the
+                # installer existed uploaded a bare exe as
+                # FinFetcher_<branch>. Those runs stay in the Actions
+                # history for good, so this stays true for good.
+                'is_installer': 'setup' in artifact_name.lower(),
+            },
         })
 
+    return {
+        'artifacts': result,
+        'current_version': current_version,
+        'current_build': build_info,
+    }
+
+
+@app.route('/api/update/artifacts', methods=['GET'])
+def update_artifacts():
+    """The alpha channel list, served from the cache the checks refresh."""
+    try:
+        data = release_cache.get_artifacts()
+        return jsonify({**data, 'fetched_at': release_cache.fetched_at_iso()})
     except Exception as e:
-        return jsonify({'error': str(e), 'artifacts': [], 'current_version': current_version,
-                        'current_build': build_info})
+        return jsonify({'error': str(e), 'artifacts': [],
+                        'current_version': update_manager.get_current_version(),
+                        'current_build': update_manager.get_build_info()})
 
 
 # ============ Settings API Endpoints ============

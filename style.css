@@ -1708,6 +1708,49 @@ input.settings-text {
     margin-top: 3px;
 }
 
+/* The manual refresh, sat apart from the channel tabs it acts on */
+.refresh-releases-btn {
+    margin-left: auto;
+    flex: 0 0 auto;
+    width: 30px;
+    padding: 6px 0;
+    border: none;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.refresh-releases-btn:hover:not(:disabled) {
+    background: rgba(107, 197, 210, 0.2);
+    color: var(--accent-glow);
+}
+
+.refresh-releases-btn:disabled {
+    cursor: default;
+    opacity: 0.6;
+}
+
+.refresh-releases-btn.spinning {
+    animation: refresh-spin 0.9s linear infinite;
+}
+
+@keyframes refresh-spin {
+    to { transform: rotate(360deg); }
+}
+
+.releases-checked-at {
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.35);
+    text-align: right;
+    margin: 4px 2px 6px 0;
+    /* Reserve the line even before the first render, so the list does not
+       jump down when the timestamp appears */
+    min-height: 0.9em;
+}
+
 /* Identifies the running build above the Alpha list, so a row can be compared
    against it without leaving the panel */
 .current-build-line {

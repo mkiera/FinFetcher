@@ -94,7 +94,8 @@ async function showMainApp() {
     // Only check for updates if the user hasn't turned that off
     const settings = await loadUpdateSettings();
     if (!settings || settings.auto_check_updates !== false) {
-        checkForUpdates();
+        checkForUpdates({ bypassCooldown: true });
+        restartUpdateCheckTimer();
     }
 }
 
@@ -895,6 +896,17 @@ function releaseBlockedReason(release) {
     return null;
 }
 
+// "Last checked 3:41 PM" under the tabs — the answer to "is this list
+// current?", which is the question the refresh button exists for
+function renderCheckedAt(iso) {
+    const el = document.getElementById('releasesCheckedAt');
+    if (!el) return;
+    if (!iso) { el.textContent = ''; return; }
+    const when = new Date(iso);
+    el.textContent = isNaN(when) ? '' :
+        `Last checked ${when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+}
+
 function buildReleaseRow(label, badges, dateText, note) {
     const row = document.createElement('div');
     row.className = 'release-row';
@@ -991,6 +1003,25 @@ function renderCurrentBuildLine(build, currentVersion) {
     }
 }
 
+// The refresh button: force a fresh fetch (the server cache still applies a
+// short floor so mashing this cannot spend the GitHub rate limit), re-render
+// the open tab from the new data, and restart the hourly timer so the next
+// automatic check is a full hour from now.
+async function refreshReleases() {
+    const btn = document.getElementById('refreshReleasesBtn');
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add('spinning');
+    try {
+        await checkForUpdates({ bypassCooldown: true, surfaceSkipped: true });
+        restartUpdateCheckTimer();
+        await fetchReleases(currentChannel);
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('spinning');
+    }
+}
+
 async function fetchReleases(channel) {
     const listEl = document.getElementById('releasesList');
     showReleasesMessage(listEl, 'Loading releases...');
@@ -1021,6 +1052,7 @@ async function fetchReleases(channel) {
             const footerVersion = document.getElementById('settingsVersionDisplay');
             if (footerVersion) footerVersion.textContent = `v${data.current_version}`;
 
+            renderCheckedAt(data.fetched_at);
             renderCurrentBuildLine(data.current_build, data.current_version);
 
             listEl.innerHTML = '';
@@ -1086,6 +1118,8 @@ async function fetchReleases(channel) {
         // Update footer version
         const footerVersion = document.getElementById('settingsVersionDisplay');
         if (footerVersion) footerVersion.textContent = `v${data.current_version}`;
+
+        renderCheckedAt(data.fetched_at);
 
         listEl.innerHTML = '';
         let firstSelectable = null;
@@ -1171,10 +1205,40 @@ async function installSelectedVersion() {
     startUpdate();
 }
 
-async function checkForUpdates(force = false) {
+// The in-session check schedule. Launch always checks; this keeps a long-lived
+// session checking every hour after that, and a manual refresh restarts the
+// hour so the next automatic check is never moments after a manual one.
+let updateCheckTimer = null;
+const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
+
+function restartUpdateCheckTimer() {
+    if (updateCheckTimer) clearInterval(updateCheckTimer);
+    updateCheckTimer = setInterval(async () => {
+        await checkForUpdates({ bypassCooldown: true });
+        refreshVisibleReleaseList();
+    }, UPDATE_CHECK_INTERVAL_MS);
+}
+
+// Re-render the release list only when the user is actually looking at it —
+// a background hour-tick must not yank the DOM around under a click
+function refreshVisibleReleaseList() {
+    const modal = document.getElementById('settingsModal');
+    const updates = document.getElementById('settingsSectionUpdates');
+    if (modal && updates && !modal.classList.contains('hidden')
+        && !updates.classList.contains('hidden')) {
+        fetchReleases(currentChannel);
+    }
+}
+
+// bypassCooldown: skip the server's once-an-hour gate (the cache still
+// enforces its own short floor against hammering GitHub).
+// surfaceSkipped: show the banner even for a version the user chose to skip —
+// true only for explicit user actions, never for automatic checks.
+async function checkForUpdates({ bypassCooldown = false, surfaceSkipped = false } = {}) {
+    const force = surfaceSkipped;
     try {
         const params = new URLSearchParams();
-        if (force) params.set('force', 'true');
+        if (bypassCooldown || surfaceSkipped) params.set('force', 'true');
 
         const response = await fetch(`/api/update/check?${params}`);
         const data = await response.json();
@@ -1210,7 +1274,8 @@ async function manualCheckForUpdates() {
     statusEl.className = 'update-check-status';
 
     try {
-        const data = await checkForUpdates(true);
+        const data = await checkForUpdates({ bypassCooldown: true, surfaceSkipped: true });
+        restartUpdateCheckTimer();
 
         if (!data) {
             statusEl.textContent = '❌ Could not reach GitHub';
