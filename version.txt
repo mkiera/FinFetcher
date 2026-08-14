@@ -1,1 +1,1 @@
-1.2.6f-update-cache
+1.2.6
