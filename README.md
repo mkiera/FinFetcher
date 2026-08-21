@@ -57,4 +57,15 @@ build zip.bat
 
 ## License
 
-MIT License
+FinFetcher is licensed under the [GNU General Public License v3.0](LICENSE).
+
+You may use, modify and redistribute it. If you distribute a modified version,
+that version has to be under the GPL too, with its source available.
+
+GPL rather than something more permissive because of what ships inside the
+build: FinFetcher bundles [mutagen](https://github.com/quodlibet/mutagen)
+(GPL-2.0-or-later), which yt-dlp uses to write cover art into opus and flac
+files. A binary containing it cannot be distributed under MIT terms.
+
+FFmpeg is not bundled — the app downloads it on first run, so its own licence
+applies to your copy of it, not to FinFetcher.
