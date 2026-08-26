@@ -1,1 +1,1 @@
-1.3.0f-ytdlp-selfupdate
+1.2.8
