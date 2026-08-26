@@ -21,7 +21,7 @@
 # --- what the app imports directly -------------------------------------
 flask==3.1.3
 pywebview==6.2.1
-yt-dlp==2026.7.4
+yt-dlp==2026.8.19
 # Not imported by main.pyw, but not optional either: without certifi, HTTPS
 # verification falls back to the Windows store, which shipped an expired root
 # and broke the in-app updater in 1.2.2. mutagen is what yt-dlp uses to embed
