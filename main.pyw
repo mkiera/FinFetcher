@@ -27,7 +27,76 @@ import time
 import zipfile
 import tempfile
 import shutil
-import yt_dlp
+
+
+# ---- Managed yt-dlp -------------------------------------------------------
+# yt-dlp is the one dependency that goes stale on YouTube's schedule rather
+# than ours: twice now every download broke with HTTP 403 because the pinned
+# copy predated a change on their side, each time already fixed in a published
+# version. So a newer copy downloaded into AppData takes precedence over the
+# bundled one, and that has to happen before the import below — sys.path is
+# consulted ahead of the frozen bundle (verified against a real PyInstaller
+# build), so prepending the directory is the whole mechanism.
+#
+# The bundled copy is never removed. It is what the app falls back to when the
+# managed one is missing, corrupt, or fails to import.
+MANAGED_YTDLP_DIRNAME = 'ytdlp'
+
+
+def _managed_ytdlp_root():
+    """Where managed copies live.
+
+    Mirrors FFmpegManager.get_app_data_dir(), which is not defined yet at the
+    point this runs.
+    """
+    if os.name == 'nt':
+        base = os.environ.get('APPDATA', os.path.expanduser('~'))
+    else:
+        base = os.path.expanduser('~/.config')
+    return os.path.join(base, 'FinFetcher', MANAGED_YTDLP_DIRNAME)
+
+
+def _activate_managed_ytdlp():
+    """Prepend the active managed copy to sys.path. Returns the path, or None.
+
+    Deliberately silent and defensive: a broken managed install must never
+    stop the app starting, because the bundled copy is right there.
+    """
+    try:
+        root = _managed_ytdlp_root()
+        with open(os.path.join(root, 'active.json'), encoding='utf-8') as f:
+            version = json.load(f).get('version')
+        if not version:
+            return None
+        path = os.path.join(root, version)
+        # Must actually hold a yt_dlp package, or the insert shadows nothing
+        # and silently changes no behaviour
+        if not os.path.isfile(os.path.join(path, 'yt_dlp', 'version.py')):
+            return None
+        sys.path.insert(0, path)
+        return path
+    except Exception:
+        return None
+
+
+_MANAGED_YTDLP_PATH = _activate_managed_ytdlp()
+_MANAGED_YTDLP_FAILED = None
+
+try:
+    import yt_dlp
+except Exception:
+    # The managed copy is unusable. Fall back to the bundled one and remember
+    # which version failed, so the updater retires it instead of activating
+    # the same broken copy on every launch.
+    if _MANAGED_YTDLP_PATH in sys.path:
+        sys.path.remove(_MANAGED_YTDLP_PATH)
+    for _stale in [n for n in list(sys.modules)
+                   if n == 'yt_dlp' or n.startswith('yt_dlp.')]:
+        sys.modules.pop(_stale, None)
+    _MANAGED_YTDLP_FAILED = _MANAGED_YTDLP_PATH
+    _MANAGED_YTDLP_PATH = None
+    import yt_dlp
+
 from yt_dlp.postprocessor import PostProcessor
 from yt_dlp.utils import DownloadCancelled, download_range_func
 from flask import Flask, request, jsonify, send_from_directory, Response
@@ -367,6 +436,228 @@ class JsRuntimeManager:
 js_runtime_manager = JsRuntimeManager()
 
 
+class YtdlpUpdater:
+    """Keeps yt-dlp current without shipping a FinFetcher release.
+
+    Installs are versioned directories under the managed root, with
+    active.json naming the one to load. Swapping versions is a one-file write,
+    so a download that dies half-way leaves the previous copy active rather
+    than a half-extracted one.
+
+    Only ever moves forward: a managed copy older than what is bundled is
+    pointless, because the bundled copy would have been newer anyway.
+    """
+
+    PYPI_URL = 'https://pypi.org/pypi/yt-dlp/json'
+    # Enough that a check cannot become a per-launch tax on PyPI, short enough
+    # that a YouTube-breaking day is measured in hours, not days
+    CHECK_INTERVAL_SECONDS = 6 * 3600
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._last_check = 0.0
+        self.last_error = None
+        self.last_result = None
+
+    # -- paths and state ---------------------------------------------------
+
+    def root(self):
+        return _managed_ytdlp_root()
+
+    def _active_file(self):
+        return os.path.join(self.root(), 'active.json')
+
+    def _read_active(self):
+        try:
+            with open(self._active_file(), encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _write_active(self, version):
+        os.makedirs(self.root(), exist_ok=True)
+        tmp = self._active_file() + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump({'version': version}, f)
+        os.replace(tmp, self._active_file())
+
+    def bundled_version(self):
+        """The version PyInstaller froze in, regardless of what is loaded.
+
+        Recorded at build time by make_build_info.py, because once a managed
+        copy is active the bundled one is no longer the module that imports.
+        Running from source has no stamp, and there the running copy is the
+        bundled one by definition.
+        """
+        stamped = update_manager.get_build_info().get('ytdlp')
+        return stamped or (self.running_version() if not self.is_managed() else 'unknown')
+
+    def running_version(self):
+        return getattr(yt_dlp.version, '__version__', 'unknown')
+
+    def is_managed(self):
+        return _MANAGED_YTDLP_PATH is not None
+
+    def describe(self):
+        """One line for the debug panel: which copy is live, and from where."""
+        running = self.running_version()
+        if _MANAGED_YTDLP_FAILED:
+            return (f'{running} (bundled — a downloaded copy failed to load '
+                    f'and was retired)')
+        if self.is_managed():
+            return f'{running} (auto-updated, bundled was {self.bundled_version()})'
+        return f'{running} (bundled)'
+
+    # -- retiring a copy that would not import ------------------------------
+
+    def retire_failed(self):
+        """Drop the active pointer when the copy behind it would not import.
+
+        Called once at startup. Without it a corrupt install would be selected
+        on every launch, failing the same way each time.
+        """
+        if not _MANAGED_YTDLP_FAILED:
+            return
+        try:
+            os.remove(self._active_file())
+        except OSError:
+            pass
+        shutil.rmtree(_MANAGED_YTDLP_FAILED, ignore_errors=True)
+
+    # -- the check itself ---------------------------------------------------
+
+    def _latest_from_pypi(self):
+        req = Request(self.PYPI_URL, headers={'User-Agent': 'FinFetcher-Updater/1.0'})
+        with urlopen(req, timeout=20, context=get_ssl_context()) as response:
+            data = json.loads(response.read().decode('utf-8'))
+        version = data['info']['version']
+        wheels = [u for u in data['urls'] if u['packagetype'] == 'bdist_wheel'
+                  and u['filename'].endswith('-py3-none-any.whl')]
+        if not wheels:
+            raise RuntimeError('no pure-python wheel published for ' + version)
+        return version, wheels[0]['url']
+
+    @staticmethod
+    def _is_newer(candidate, current):
+        """yt-dlp versions are date-shaped (2026.8.19), so compare numerically.
+
+        String comparison would rank 2026.7.4 above 2026.8.19 on the '.7' —
+        exactly the upgrade that mattered most.
+        """
+        def parts(v):
+            out = []
+            for chunk in str(v).split('.'):
+                digits = ''.join(c for c in chunk if c.isdigit())
+                out.append(int(digits) if digits else 0)
+            return out
+        a, b = parts(candidate), parts(current)
+        a += [0] * (len(b) - len(a))
+        b += [0] * (len(a) - len(b))
+        return a > b
+
+    def check_and_install(self, force=False):
+        """Install a newer yt-dlp if PyPI has one. Returns a result dict.
+
+        Never raises: a failed check leaves the working copy alone, and the
+        reason is kept for the debug panel.
+        """
+        with self._lock:
+            if not force and time.time() - self._last_check < self.CHECK_INTERVAL_SECONDS:
+                return {'checked': False, 'reason': 'interval'}
+            self._last_check = time.time()
+
+        try:
+            latest, wheel_url = self._latest_from_pypi()
+            running = self.running_version()
+            if not self._is_newer(latest, running):
+                self.last_error = None
+                self.last_result = {'checked': True, 'updated': False,
+                                    'running': running, 'latest': latest}
+                return self.last_result
+
+            self._install(latest, wheel_url)
+            self.last_error = None
+            self.last_result = {'checked': True, 'updated': True,
+                                'running': running, 'installed': latest}
+            return self.last_result
+        except Exception as e:
+            # A failed update is not a failed app — the copy in use is
+            # untouched, and the next check tries again.
+            self.last_error = str(e)
+            self.last_result = {'checked': True, 'updated': False, 'error': str(e)}
+            return self.last_result
+
+    def _install(self, version, wheel_url):
+        """Download the wheel and make it the active copy.
+
+        Extracted to a staging directory and moved into place, so an
+        interrupted download cannot become a half-written active version.
+        """
+        root = self.root()
+        os.makedirs(root, exist_ok=True)
+        target = os.path.join(root, version)
+        staging = os.path.join(root, f'.staging-{version}')
+        shutil.rmtree(staging, ignore_errors=True)
+
+        temp_dir = tempfile.mkdtemp()
+        wheel_path = os.path.join(temp_dir, 'ytdlp.whl')
+        try:
+            req = Request(wheel_url, headers={'User-Agent': 'FinFetcher-Updater/1.0'})
+            with urlopen(req, timeout=120, context=get_ssl_context()) as response:
+                with open(wheel_path, 'wb') as f:
+                    shutil.copyfileobj(response, f)
+
+            with zipfile.ZipFile(wheel_path) as zf:
+                zf.extractall(staging)
+
+            probe = os.path.join(staging, 'yt_dlp', 'version.py')
+            if not os.path.isfile(probe):
+                raise RuntimeError('wheel did not contain a yt_dlp package')
+
+            if os.path.isdir(target):
+                shutil.rmtree(target, ignore_errors=True)
+            os.replace(staging, target)
+            self._write_active(version)
+            self._prune(keep=version)
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            shutil.rmtree(staging, ignore_errors=True)
+
+    def _prune(self, keep):
+        """Keep only the active copy. Old ones are dead weight — the bundled
+        copy is the fallback, not the previous download."""
+        root = self.root()
+        try:
+            entries = os.listdir(root)
+        except OSError:
+            return
+        for entry in entries:
+            path = os.path.join(root, entry)
+            if os.path.isdir(path) and entry != keep:
+                shutil.rmtree(path, ignore_errors=True)
+
+
+ytdlp_updater = YtdlpUpdater()
+# A copy that would not import is dropped once, at startup, so the next check
+# installs a fresh one instead of re-selecting the same broken directory.
+ytdlp_updater.retire_failed()
+
+
+def _start_ytdlp_check(force=False):
+    """Run the yt-dlp check on a background thread, if the user allows it.
+
+    Fire and forget: a new yt-dlp only takes effect at the next launch, so
+    nothing in this process is waiting on the result.
+    """
+    try:
+        if not settings_manager.get_settings().get('auto_update_ytdlp', True):
+            return
+    except Exception:
+        return
+    threading.Thread(target=ytdlp_updater.check_and_install,
+                     kwargs={'force': force}, daemon=True).start()
+
+
 def get_js_runtime_opts():
     """The js_runtimes entry for a YoutubeDL options dict.
 
@@ -599,7 +890,11 @@ class UpdateManager:
         else:
             base_path = os.path.dirname(os.path.abspath(__file__))
 
-        info = {'sha': None, 'branch': None, 'run_id': None, 'built_at': None}
+        # 'ytdlp' is the version frozen into this build — see
+        # YtdlpUpdater.bundled_version, which cannot read it any other way
+        # once a managed copy is active.
+        info = {'sha': None, 'branch': None, 'run_id': None, 'built_at': None,
+                'ytdlp': None}
         try:
             with open(os.path.join(base_path, 'build_info.json'), encoding='utf-8') as f:
                 stamped = json.load(f)
@@ -758,6 +1053,12 @@ class UpdateManager:
             
         Returns dict with update info or None if up-to-date/error.
         """
+        # yt-dlp rides the same cadence — launch, the hourly timer, the refresh
+        # button — but on a thread, because a 3 MB wheel download must not hold
+        # up the release check the user is actually waiting on. Its own
+        # interval decides whether the call does any work.
+        _start_ytdlp_check()
+
         # Respect the user's preference and the cooldown unless forced
         if not force and not self._config.get('auto_check_updates', True):
             return {'skipped': True, 'reason': 'disabled'}
@@ -1298,6 +1599,11 @@ class AppSettings:
         # entry fetched as audio counts as "done" for a later video run.
         # Opting in has to be a deliberate choice.
         'use_download_archive': False,
+        # On by default, and the reason this app keeps working between
+        # releases: YouTube breaks yt-dlp on their schedule, and waiting for a
+        # FinFetcher release to carry the fix meant every download 403'd in the
+        # meantime. Off pins the app to whatever yt-dlp was bundled.
+        'auto_update_ytdlp': True,
         # On by default: fetching only the requested range is the whole point
         # of a trim. Turning it off downloads the video in full and cuts it
         # afterwards, which is slower but goes through yt-dlp's own downloader
@@ -2366,12 +2672,6 @@ def get_debug_info():
         }
     }
     
-    # Check yt-dlp
-    try:
-        debug_info['dependencies']['yt-dlp'] = yt_dlp.version.__version__
-    except Exception as e:
-        debug_info['dependencies']['yt-dlp'] = f"Error: {str(e)}"
-
     # Which CA store HTTPS verification uses — a missing certifi bundle
     # breaks downloads on machines whose OS store holds an expired root
     debug_info['dependencies']['CA store'] = get_ca_source()
@@ -2379,6 +2679,13 @@ def get_debug_info():
     # No runtime is the one condition that 403s every YouTube download, so the
     # panel says it outright instead of listing a bare "none"
     debug_info['dependencies']['JS runtime'] = js_runtime_manager.describe()
+
+    # Which yt-dlp is actually loaded — the bundled one or a newer downloaded
+    # one. The last two 403 reports both came down to this and the panel could
+    # not answer it.
+    debug_info['dependencies']['yt-dlp'] = ytdlp_updater.describe()
+    if ytdlp_updater.last_error:
+        debug_info['dependencies']['yt-dlp update'] = f'last check failed: {ytdlp_updater.last_error}'
     
     # Check ffmpeg
     ffmpeg_exe = get_ffmpeg_path()

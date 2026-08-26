@@ -1576,6 +1576,7 @@ function applyDownloadSettings(settings) {
     // No upper bound in the contract — the backend is the authority on clamping
     document.getElementById('rateLimitKbps').value = clampInt(settings.rate_limit_kbps, 0, Infinity, 0);
     document.getElementById('downloadArchiveToggle').checked = settings.use_download_archive !== false;
+    document.getElementById('autoUpdateYtdlpToggle').checked = settings.auto_update_ytdlp !== false;
     document.getElementById('fastTrimToggle').checked = settings.fast_trim !== false;
     document.getElementById('preciseTrimToggle').checked = settings.precise_trim === true;
     document.getElementById('logToggle').checked = settings.log_to_file === true;
@@ -1661,6 +1662,7 @@ async function saveDownloadSettings() {
         concurrent_fragments: clampInt(document.getElementById('concurrentFragments').value, 1, 16, 4),
         rate_limit_kbps: clampInt(document.getElementById('rateLimitKbps').value, 0, Infinity, 0),
         use_download_archive: document.getElementById('downloadArchiveToggle').checked,
+        auto_update_ytdlp: document.getElementById('autoUpdateYtdlpToggle').checked,
         fast_trim: document.getElementById('fastTrimToggle').checked,
         precise_trim: document.getElementById('preciseTrimToggle').checked,
         log_to_file: document.getElementById('logToggle').checked,
@@ -1815,7 +1817,9 @@ async function loadDebugInfo() {
             `yt-dlp: ${deps['yt-dlp']}\n` +
             `ffmpeg: ${deps['ffmpeg']}\n` +
             `CA store: ${deps['CA store'] || 'unknown'}\n` +
-            `JS runtime: ${deps['JS runtime'] || 'unknown'}`;
+            `JS runtime: ${deps['JS runtime'] || 'unknown'}` +
+            (deps['yt-dlp update'] ? `
+yt-dlp update: ${deps['yt-dlp update']}` : '');
 
         // Last error
         if (lastError) {

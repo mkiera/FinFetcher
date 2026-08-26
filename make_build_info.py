@@ -41,9 +41,19 @@ def build_info():
               or _git('rev-parse', '--abbrev-ref', 'HEAD'))
     run_id = os.environ.get('GITHUB_RUN_ID')
 
+    # The yt-dlp that got frozen in. Once the app auto-updates yt-dlp into
+    # AppData, the bundled version is no longer readable at run time — the
+    # managed copy is what imports — so it is recorded here instead.
+    try:
+        import yt_dlp
+        bundled_ytdlp = yt_dlp.version.__version__
+    except Exception:
+        bundled_ytdlp = None
+
     return {
         'sha': sha,
         'branch': branch,
+        'ytdlp': bundled_ytdlp,
         # Only CI runs have one. A local build leaves it null and is matched by
         # commit, which is right — it was never uploaded as an artifact anyway.
         'run_id': int(run_id) if run_id and run_id.isdigit() else None,
