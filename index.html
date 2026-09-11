@@ -220,6 +220,21 @@
         </main>
     </div>
 
+    <div id="destinationModal" class="modal hidden" role="dialog" aria-modal="true"
+        aria-labelledby="destinationTitle">
+        <div class="modal-content glass-panel">
+            <h2 id="destinationTitle">File already exists</h2>
+            <p id="destinationPaths" style="white-space: pre-wrap; overflow-wrap: anywhere"></p>
+            <p>Choose where to save this download before it starts.</p>
+            <div class="setup-buttons" style="margin: 16px auto 0">
+                <button onclick="chooseDownloadDestination('overwrite')">Overwrite</button>
+                <button class="secondary" onclick="chooseDownloadDestination('folder')">Pick where to place it</button>
+                <button id="destinationCancel" class="secondary" onclick="chooseDownloadDestination('cancel')">Cancel</button>
+            </div>
+            <p id="destinationError" role="alert"></p>
+        </div>
+    </div>
+
     <!-- Modal for Playlist Selection -->
     <div id="playlistModal" class="modal hidden">
         <div class="modal-content glass-panel">
@@ -418,9 +433,8 @@
                 <div class="toggle-row">
                     <div class="settings-label">
                         <span>Fast trim</span>
-                        <span class="settings-hint">Only affects Trim Video. Fetches just the selected range
-                            instead of the whole video. Turn off to download in full and cut afterwards —
-                            slower, but it works on sources that refuse the direct fetch.</span>
+                        <span class="settings-hint">Fetches the selected range directly. Speed depends on
+                            the source. Turn off to use the regular downloader and cut the saved file.</span>
                     </div>
                     <label class="switch small">
                         <input type="checkbox" id="fastTrimToggle" onchange="saveDownloadSettings()">
@@ -431,11 +445,10 @@
                 <div class="toggle-row">
                     <div class="settings-label">
                         <span>Precise trim</span>
-                        <span class="settings-hint">Only affects Trim Video. Cuts exactly on the timestamps by
-                            re-encoding the clip; off snaps to the nearest keyframe and just copies it.
-                            This is the slow one — re-encoding to <strong>webm</strong> took roughly 19&times;
-                            as long as mp4 in testing, so leave it off for webm unless you need the exact
-                            frame.</span>
+                        <span class="settings-hint">Re-encodes the clip for an exact start and end.
+                            Off copies video from the preceding keyframe, so the clip can start earlier.
+                            Both modes preserve a playable start. High-resolution and webm encoding
+                            can still take longer.</span>
                     </div>
                     <label class="switch small">
                         <input type="checkbox" id="preciseTrimToggle" onchange="saveDownloadSettings()">

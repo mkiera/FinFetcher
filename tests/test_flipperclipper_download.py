@@ -17,22 +17,30 @@ class FakeYoutubeDL:
 
     def __init__(self, options):
         self.options = options
+        self.params = options
 
     def __enter__(self):
         return self
+
+    def add_post_processor(self, processor, when):
+        pass
 
     def __exit__(self, *_args):
         return False
 
     def download(self, _urls):
-        with open(self.output_path, 'wb') as video:
+        template = self.options['outtmpl']
+        if isinstance(template, dict):
+            template = template['default']
+        output_path = os.path.join(os.path.dirname(template), os.path.basename(self.output_path))
+        with open(output_path, 'wb') as video:
             video.write(b'video')
         for hook in self.options['progress_hooks']:
-            hook({'status': 'finished', 'filename': self.output_path})
+            hook({'status': 'finished', 'filename': output_path})
         for hook in self.options['postprocessor_hooks']:
             hook({
                 'status': 'finished',
-                'info_dict': {'filepath': self.output_path},
+                'info_dict': {'filepath': output_path},
             })
 
 

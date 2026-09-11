@@ -27,8 +27,10 @@ import time
 import zipfile
 import tempfile
 import shutil
+import uuid
 
 from flipperclipper import find_flipperclipper, open_in_flipperclipper
+from download_output import DownloadOutput
 
 
 # ---- Managed yt-dlp -------------------------------------------------------
@@ -100,6 +102,7 @@ except Exception:
     import yt_dlp
 
 from yt_dlp.postprocessor import PostProcessor
+from trimming import RangeTrimPP, configure_range_trim, video_encode_args, select_encoder
 from yt_dlp.utils import DownloadCancelled, download_range_func
 from flask import Flask, request, jsonify, send_from_directory, Response
 from urllib.request import urlopen, Request
@@ -1612,16 +1615,6 @@ class AppSettings:
         # rather than handing the media URL to ffmpeg — the way out when a
         # source refuses ffmpeg's direct fetch.
         'fast_trim': True,
-        # On by default so trimming stays frame-accurate, as it was before
-        # range downloads. Turning it off snaps cuts to the nearest keyframe.
-        #
-        # This is the expensive setting, not fast_trim. It maps to
-        # force_keyframes_at_cuts, and FFmpegFD drops "-c copy" whenever that
-        # is set with a range (yt_dlp/downloader/external.py:589-590), so the
-        # slice is re-encoded rather than copied. Measured on 24s of 360p:
-        # 0.2s copied, 1.0s re-encoded to mp4 (libx264), 18.4s re-encoded to
-        # webm (libvpx-vp9). The container multiplies it, which is why a webm
-        # trim feels broken and the same trim to mp4 does not.
         'precise_trim': True,
         # Sits in the same settings panel as everything else here, so it has to
         # survive a restart like everything else here. The download request still
@@ -1839,6 +1832,26 @@ class Api:
     def select_folder(self):
         folder = webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG)
         return folder[0] if folder else None
+
+
+class DownloadDestinationPP(PostProcessor):
+    def __init__(self, downloader, output, ask, job, audio_extension=None):
+        super().__init__(downloader)
+        self.output = output
+        self.ask = ask
+        self.job = job
+        self.audio_extension = audio_extension
+
+    def run(self, info):
+        filename = self._downloader.prepare_filename(info)
+        relative = os.path.relpath(filename, self.output.directory)
+        names = [relative]
+        if self.audio_extension:
+            names.append(os.path.splitext(relative)[0] + '.' + self.audio_extension)
+        if not self.output.prepare(names, self.ask, self.job.is_cancelled):
+            self.job.cancel()
+            raise DownloadCancelled('Cancelled by the user')
+        return [], info
 
 app = Flask(__name__, static_folder='.')
 
@@ -3624,6 +3637,25 @@ def cancel_download():
     return jsonify({'success': True})
 
 
+@app.route('/api/download/destination', methods=['POST'])
+def choose_download_destination():
+    data = request.get_json(silent=True) or {}
+    action = data.get('action')
+    if action not in ('overwrite', 'folder', 'cancel'):
+        return jsonify({'error': 'Choose overwrite, another folder, or cancel.'}), 400
+    if action == 'folder' and (not isinstance(data.get('path'), str)
+                               or not os.path.isdir(data['path'])):
+        return jsonify({'error': 'Choose an existing folder.'}), 400
+    with _download_job_lock:
+        job = _current_download_job
+        if (job is None or not getattr(job, 'destination_request', None)
+                or job.destination_request != data.get('id')):
+            return jsonify({'error': 'This download is no longer waiting for a destination.'}), 409
+        job.destination_request = None
+        job.destination_answers.put(data)
+    return jsonify({'success': True})
+
+
 @app.route('/api/download', methods=['POST'])
 def download():
     """API endpoint to initiate download with yt-dlp Python API."""
@@ -3650,6 +3682,11 @@ def download():
         save_path = os.path.join(os.path.expanduser("~"), "Downloads")
     if not os.path.exists(save_path):
         os.makedirs(save_path)
+
+    destination = save_path
+    pending_output = DownloadOutput(destination) if download_type == 'single' else None
+    if pending_output:
+        save_path = pending_output.directory
 
     # Output template — the artist prefix (and its separator) is dropped
     # entirely when the video has no artist metadata, instead of "NA - ".
@@ -3695,6 +3732,7 @@ def download():
         # serve a partial download fall back to the ffmpeg trim below.
         ydl_opts['download_ranges'] = download_range_func(None, [(start_sec, end_sec)])
         ydl_opts['force_keyframes_at_cuts'] = settings['precise_trim']
+        configure_range_trim(ydl_opts, mode, settings['precise_trim'], settings['container'])
 
     # Mode-specific options
     if mode == 'audio':
@@ -3752,6 +3790,18 @@ def download():
     # Registered below, before the response is handed back, so a Cancel that
     # lands the instant the download starts still finds this run.
     job = DownloadJob()
+    job.destination_request = None
+    job.destination_answers = queue.Queue()
+
+    def ask_destination(paths):
+        job.destination_request = uuid.uuid4().hex
+        msg_queue.put({'destination_request': {'id': job.destination_request, 'paths': paths}})
+        while not job.is_cancelled():
+            try:
+                return job.destination_answers.get(timeout=0.1)
+            except queue.Empty:
+                continue
+        return {'action': 'cancel'}
 
     def progress_hook(d):
         """Callback for yt-dlp progress."""
@@ -3813,7 +3863,17 @@ def download():
         _ytdlp_child.remember = remember_file
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([url])
+                if pending_output:
+                    ydl.add_post_processor(DownloadDestinationPP(
+                        ydl, pending_output, ask_destination, job,
+                        settings['audio_format'] if mode == 'audio' else None), when='video')
+                if opts.get('download_ranges'):
+                    ydl.add_post_processor(RangeTrimPP(ydl, mode, settings['precise_trim'], get_ffmpeg_path()),
+                                           when='before_dl')
+                try:
+                    ydl.download([url])
+                finally:
+                    opts['_trim_encoder'] = ydl.params.get('_trim_encoder', 'libx264')
             result_queue.put({'success': True})
         except Exception as e:
             # A cancel is not a failure to show the user as an error. It
@@ -3879,7 +3939,7 @@ def download():
                         # Optional: log to file
                         if log_to_file:
                             try:
-                                log_path = os.path.join(save_path, "download_log.txt")
+                                log_path = os.path.join(destination, "download_log.txt")
                                 with open(log_path, "a", encoding="utf-8") as f:
                                     f.write(msg.get('log', '') + "\n")
                             except:
@@ -3961,7 +4021,7 @@ def download():
                                                     cancelled=not keep_output,
                                                     since=run_started):
                 yield f"data: {json.dumps({'log': message})}\n\n"
-            if download_success and final_file:
+            if download_success and final_file and not pending_output:
                 yield f"data: {json.dumps({'log': f'> [FinFetcher] The download itself had already finished, so {final_file} was kept.'})}\n\n"
             yield f"data: {json.dumps({'status': 'cancelled'})}\n\n"
 
@@ -3969,11 +4029,17 @@ def download():
             trimmed_on_download = False
             final_file, download_success, error_payload = yield from run_attempt(ydl_opts)
 
+            if (not download_success and not job.is_cancelled()
+                    and ydl_opts.get('_trim_encoder', 'libx264') != 'libx264'):
+                yield f"data: {json.dumps({'log': '> [FinFetcher] Hardware trim failed. Retrying with software encoding.'})}\n\n"
+                ydl_opts['_trim_software'] = True
+                final_file, download_success, error_payload = yield from run_attempt(ydl_opts)
+
             if fast_trim:
                 if download_success and final_file and _has_usable_output(final_file):
                     trimmed_on_download = True
-                    cut = 'exact cut' if settings['precise_trim'] else 'cut at the nearest keyframes'
-                    yield f"data: {json.dumps({'log': f'> [FinFetcher] Fast trim: downloaded only {trim_start} to {trim_end} ({cut}).'})}\n\n"
+                    cut = 'exact cut' if settings['precise_trim'] else 'starts at the preceding keyframe'
+                    yield f"data: {json.dumps({'log': f'> [FinFetcher] Fast trim finished for {trim_start} to {trim_end} ({cut}).'})}\n\n"
                 else:
                     # Three ways the fast path fails, all answered the same
                     # way — fetch the whole thing through yt-dlp's own
@@ -4010,6 +4076,7 @@ def download():
                                 _remove_file_with_retry(path)
                         ydl_opts.pop('download_ranges', None)
                         ydl_opts.pop('force_keyframes_at_cuts', None)
+                        ydl_opts.pop('external_downloader_args', None)
                         final_file, download_success, error_payload = yield from run_attempt(ydl_opts)
 
             # Fresh tries when YouTube refuses a session's media URLs.
@@ -4034,6 +4101,9 @@ def download():
             if error_payload:
                 yield f"data: {json.dumps(error_payload)}\n\n"
 
+            trimmed_on_download = bool(ydl_opts.get('download_ranges') and download_success
+                                       and final_file and _has_usable_output(final_file))
+
             # Post-download trimming (only when the download could not do it).
             # Never start a fresh re-encode after a cancel — that would be a
             # new ffmpeg process spawned by a run the user has already stopped.
@@ -4048,7 +4118,9 @@ def download():
                 yield f"data: {json.dumps({'log': f'> [FinFetcher] Invalid trim range ({trim_start} to {trim_end}) — keeping the full download.'})}\n\n"
             elif can_trim:
                 try:
-                    yield f"data: {json.dumps({'log': f'> [FinFetcher] Trimming video from {trim_start} to {trim_end} with ffmpeg (re-encode)...'})}\n\n"
+                    trim_method = ('re-encoding' if settings['precise_trim'] or mode == 'audio'
+                                   else 'copying from the preceding keyframe')
+                    yield f"data: {json.dumps({'log': f'> [FinFetcher] Trimming {trim_start} to {trim_end}: {trim_method}...'})}\n\n"
                     
                     base, ext = os.path.splitext(final_file)
                     trimmed_file = f"{base}_trimmed{ext}"
@@ -4066,6 +4138,9 @@ def download():
                     
                     # Detect if this is an audio-only file (MP3) or video
                     is_audio_file = ext.lower() in ['.mp3', '.m4a', '.aac', '.flac', '.wav', '.ogg', '.opus']
+                    encoder = 'libx264'
+                    if settings['precise_trim'] and not is_audio_file and ext.lower() != '.webm':
+                        encoder = select_encoder(ffmpeg_exe)
                     
                     if is_audio_file:
                         # Audio-only trimming - use appropriate audio codec
@@ -4084,63 +4159,54 @@ def download():
                         
                         ffmpeg_cmd = [
                             ffmpeg_exe, '-y',
+                            '-ss', str(start_sec),
                             '-i', final_file,
-                            '-ss', trim_start,
-                            '-to', trim_end,
+                            '-t', str(end_sec - start_sec),
                         ] + audio_codec + [trimmed_file]
                     else:
                         # Video trimming - codecs have to suit the container,
                         # which is now user-selectable: webm cannot hold
                         # H.264/AAC, so the old fixed command failed on it.
-                        if ext.lower() == '.webm':
-                            video_codec = ['-c:v', 'libvpx-vp9', '-crf', '31', '-b:v', '0',
-                                           '-c:a', 'libopus', '-b:a', '128k']
-                        else:
-                            video_codec = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '22',
-                                           '-c:a', 'aac', '-b:a', '192k',
-                                           '-strict', 'experimental']
+                        video_codec = (video_encode_args(ext, encoder) if settings['precise_trim']
+                                       else ['-c', 'copy', '-avoid_negative_ts', 'make_zero'])
 
                         ffmpeg_cmd = [
                             ffmpeg_exe, '-y',
+                            '-ss', str(start_sec),
                             '-i', final_file,
-                            '-ss', trim_start,
-                            '-to', trim_end,
+                            '-t', str(end_sec - start_sec),
                         ] + video_codec + [trimmed_file]
                     
                     environ = os.environ.copy()
                     environ["PYTHONDONTWRITEBYTECODE"] = "1"
                     
-                    trim_proc = subprocess.Popen(
-                        ffmpeg_cmd,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        encoding='utf-8',
-                        errors='replace',
-                        env=environ,
-                        startupinfo=startupinfo,
-                        creationflags=creationflags
-                    )
-                    
-                    # Cancel has to reach this process directly: it is our
-                    # child, not yt-dlp's, and the flag means nothing to it.
-                    # An ffmpeg left running past the download is what held
-                    # the handle on the file the user could not delete.
-                    job.attach_process(trim_proc)
-                    try:
-                        for tline in trim_proc.stdout:
-                            yield f"data: {json.dumps({'log': f'[ffmpeg] {tline.strip()}'})}\n\n"
-
-                        trim_proc.wait()
-                    finally:
-                        # However this block is left — normally, killed by a
-                        # cancel, or because the stream was dropped mid-encode
-                        # and the generator is closing — ffmpeg must not
-                        # outlive it. An abandoned one keeps its output file
-                        # locked, which is the leftover that could not be
-                        # deleted.
-                        job.detach_process(trim_proc)
-                        _terminate_process(trim_proc)
+                    for encode_attempt in range(2):
+                        trim_proc = subprocess.Popen(
+                            ffmpeg_cmd,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT,
+                            text=True,
+                            encoding='utf-8',
+                            errors='replace',
+                            env=environ,
+                            startupinfo=startupinfo,
+                            creationflags=creationflags
+                        )
+                        job.attach_process(trim_proc)
+                        try:
+                            for tline in trim_proc.stdout:
+                                yield f"data: {json.dumps({'log': f'[ffmpeg] {tline.strip()}'})}\n\n"
+                            trim_proc.wait()
+                        finally:
+                            job.detach_process(trim_proc)
+                            _terminate_process(trim_proc)
+                            trim_proc.stdout.close()
+                        if (trim_proc.returncode == 0 or job.is_cancelled()
+                                or encoder == 'libx264' or encode_attempt == 1):
+                            break
+                        yield f"data: {json.dumps({'log': '> [FinFetcher] Hardware trim failed. Retrying with software encoding.'})}\n\n"
+                        ffmpeg_cmd = (ffmpeg_cmd[:ffmpeg_cmd.index('-c:v')]
+                                      + video_encode_args(ext) + [trimmed_file])
 
                     # Only replace the original if ffmpeg actually produced something —
                     # an empty output would otherwise destroy the download.
@@ -4165,14 +4231,14 @@ def download():
                     elif trimmed_ok:
                         yield f"data: {json.dumps({'log': '> [FinFetcher] Trim successful! Replacing original file...'})}\n\n"
                         try:
-                            if os.path.exists(final_file):
-                                os.remove(final_file)
-                            os.rename(trimmed_file, final_file)
+                            os.replace(trimmed_file, final_file)
                             yield f"data: {json.dumps({'log': '> [FinFetcher] Ready!'})}\n\n"
                         except Exception as e:
+                            download_success = False
                             yield f"data: {json.dumps({'log': f'> [FinFetcher] Error replacing file: {e}'})}\n\n"
                     else:
                         # Leave the original download untouched and clean up the scrap
+                        download_success = False
                         try:
                             if os.path.exists(trimmed_file):
                                 os.remove(trimmed_file)
@@ -4181,6 +4247,7 @@ def download():
                         yield f"data: {json.dumps({'log': f'> [FinFetcher] Trim failed with code {trim_proc.returncode} — keeping the untrimmed download.'})}\n\n"
 
                 except Exception as e:
+                    download_success = False
                     yield f"data: {json.dumps({'log': f'> [FinFetcher] Trim error: {e}'})}\n\n"
             
             # A cancelled run ends here rather than reporting a result: it has
@@ -4195,6 +4262,18 @@ def download():
             for message in _cleanup_download_scraps(save_path, seen_files,
                                                     since=run_started):
                 yield f"data: {json.dumps({'log': message})}\n\n"
+
+            if download_success and pending_output:
+                try:
+                    published = pending_output.publish(job.is_cancelled)
+                    if published is None:
+                        yield f"data: {json.dumps({'log': '> [FinFetcher] Save cancelled. Existing files were kept.', 'status': 'cancelled'})}\n\n"
+                        return
+                    final_file = published.get(os.path.abspath(final_file)) if final_file else None
+                    yield f"data: {json.dumps({'log': '> [FinFetcher] Saved to: ' + str(pending_output.destination)})}\n\n"
+                except (OSError, RuntimeError) as error:
+                    download_success = False
+                    yield f"data: {json.dumps({'error': 'Could not save the download: ' + str(error)})}\n\n"
 
             if download_success and pass_to_flipperclipper:
                 opened, error = open_in_flipperclipper(final_file)
@@ -4255,19 +4334,11 @@ def download():
                     else:
                         yield f"data: {json.dumps({'log': '> [FinFetcher] Continuing without it — YouTube downloads may fail with HTTP 403 until a JavaScript runtime is available.'})}\n\n"
                 if fast_trim:
-                    # Say so, rather than leaving the silence to be interpreted.
-                    yield f"data: {json.dumps({'log': '> [FinFetcher] Trimming as it downloads — only the selected range is fetched, and ffmpeg reports no progress until it is done.'})}\n\n"
+                    yield f"data: {json.dumps({'log': '> [FinFetcher] Fetching the clip directly. Speed depends on the source and selected resolution.'})}\n\n"
                     if settings['precise_trim']:
-                        # The single biggest cost in the whole run, and it is
-                        # invisible: FFmpegFD drops "-c copy" for a precise
-                        # cut, so the clip is re-encoded. Naming the container
-                        # matters because vp9 is an order of magnitude slower
-                        # than h264 at it, which is the difference between a
-                        # trim that feels instant and one that looks frozen.
-                        codec_note = ('re-encoding to webm (VP9), which is slow — around 19x mp4 '
-                                      'in testing' if settings['container'] == 'webm'
-                                      else f"re-encoding to {settings['container']}")
-                        yield f"data: {json.dumps({'log': '> [FinFetcher] Precise trim is on, so it is ' + codec_note + '. Turn Precise trim off in Settings for a near-instant copy that cuts at the nearest keyframe.'})}\n\n"
+                        yield f"data: {json.dumps({'log': '> [FinFetcher] Precise trim: encoding the selected range with faster encoder settings.'})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'log': '> [FinFetcher] Copy trim: retaining the preceding keyframe. The clip may start earlier than requested.'})}\n\n"
                 elif trim_requested and trim_range_ok and download_type == 'single':
                     yield f"data: {json.dumps({'log': '> [FinFetcher] Fast trim is off — downloading in full first, then cutting with ffmpeg.'})}\n\n"
 
@@ -4278,11 +4349,23 @@ def download():
                 # However this ended, there is no longer a download for
                 # /api/download/cancel to act on.
                 _clear_current_download_job(job)
+                if not completed and job.destination_request:
+                    job.cancel()
                 if not completed and not any(t.is_alive() for t in attempt_threads):
                     _cleanup_download_scraps(save_path, seen_files,
                                              cancelled=job.is_cancelled()
                                              and download_type == 'single',
                                              since=run_started)
+                if pending_output:
+                    def cleanup_output():
+                        for attempt in attempt_threads:
+                            attempt.join()
+                        pending_output.cleanup()
+
+                    if any(t.is_alive() for t in attempt_threads):
+                        threading.Thread(target=cleanup_output, daemon=True).start()
+                    else:
+                        pending_output.cleanup()
 
         _set_current_download_job(job)
         return Flask.response_class(generate(), mimetype='text/event-stream')
@@ -4290,6 +4373,8 @@ def download():
     except Exception as e:
         # Nothing is going to run, so nothing should look cancellable
         _clear_current_download_job(job)
+        if pending_output and not any(t.is_alive() for t in attempt_threads):
+            pending_output.cleanup()
         return jsonify({'error': str(e)}), 500
 
 

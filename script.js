@@ -12,6 +12,7 @@ let cachedInfoUrl = null;
 let canSelfUpdate = true;
 let flipperClipperAvailable = false;
 let pendingPassToFlipperClipper = false;
+let destinationRequest = null;
 // True only while the download stream is open, which is the only window in
 // which /api/download/cancel has anything to act on
 let downloadInFlight = false;
@@ -676,6 +677,14 @@ async function startDownload(type, passToFlipperClipper = false) {
             recordError(reason);
         } else {
             await readEventStream(response, (msg) => {
+                if (msg.destination_request) {
+                    destinationRequest = msg.destination_request;
+                    document.getElementById('destinationPaths').textContent = destinationRequest.paths.join('\n');
+                    document.getElementById('destinationError').textContent = '';
+                    document.getElementById('destinationModal').classList.remove('hidden');
+                    document.getElementById('destinationCancel').focus();
+                    document.getElementById('downloadBtn').textContent = 'Waiting for destination...';
+                }
                 if (msg.log) {
                     log(msg.log);
                 }
@@ -713,6 +722,36 @@ async function startDownload(type, passToFlipperClipper = false) {
     resetUI();
 }
 
+async function chooseDownloadDestination(action) {
+    if (!destinationRequest) return;
+    const activeRequest = destinationRequest;
+    const buttons = document.querySelectorAll('#destinationModal button');
+    buttons.forEach(button => button.disabled = true);
+    try {
+        let path = null;
+        if (action === 'folder') {
+            path = await window.pywebview.api.select_folder();
+            if (!path) return;
+        }
+        const response = await fetch('/api/download/destination', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: activeRequest.id, action, path })
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Could not choose the destination.');
+        if (destinationRequest === activeRequest) {
+            destinationRequest = null;
+            document.getElementById('destinationModal').classList.add('hidden');
+            document.getElementById('downloadBtn').textContent = 'Downloading...';
+        }
+    } catch (error) {
+        document.getElementById('destinationError').textContent = error.message;
+    } finally {
+        buttons.forEach(button => button.disabled = false);
+    }
+}
+
 async function cancelDownload() {
     const cancelBtn = document.getElementById('cancelBtn');
     // A second click would only fire a second POST, so the button reports the
@@ -748,6 +787,8 @@ async function cancelDownload() {
 }
 
 function resetUI() {
+    destinationRequest = null;
+    document.getElementById('destinationModal').classList.add('hidden');
     document.getElementById('downloadBtn').disabled = false;
     document.getElementById('downloadBtn').textContent = "Download";
     const flipperClipperBtn = document.getElementById('flipperClipperBtn');
@@ -1781,6 +1822,21 @@ function dismissModal(id) {
 }
 
 document.addEventListener('keydown', (e) => {
+    const destinationModal = document.getElementById('destinationModal');
+    if (!destinationModal.classList.contains('hidden')) {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            if (!document.getElementById('destinationCancel').disabled) chooseDownloadDestination('cancel');
+        } else if (e.key === 'Tab') {
+            const buttons = Array.from(destinationModal.querySelectorAll('button:not(:disabled)'));
+            if (buttons.length) {
+                e.preventDefault();
+                const index = buttons.indexOf(document.activeElement);
+                buttons[(index + (e.shiftKey ? buttons.length - 1 : 1)) % buttons.length].focus();
+            }
+        }
+        return;
+    }
     if (e.key !== 'Escape') return;
     // Leaving fullscreen video already consumes Escape; closing the player in
     // the same keypress would be one dismissal too many
