@@ -28,6 +28,8 @@ import zipfile
 import tempfile
 import shutil
 
+from flipperclipper import find_flipperclipper, open_in_flipperclipper
+
 
 # ---- Managed yt-dlp -------------------------------------------------------
 # yt-dlp is the one dependency that goes stale on YouTube's schedule rather
@@ -1849,6 +1851,12 @@ def serve_static(path):
     return send_from_directory('.', path)
 
 
+@app.route('/api/integrations/flipperclipper', methods=['GET'])
+def flipperclipper_status():
+    executable = find_flipperclipper()
+    return jsonify({'installed': executable is not None})
+
+
 # ============ Setup API Endpoints ============
 
 @app.route('/api/setup/check', methods=['GET'])
@@ -3628,6 +3636,7 @@ def download():
     quality = data.get('quality', 'max')
     trim_start = data.get('trim_start')
     trim_end = data.get('trim_end')
+    pass_to_flipperclipper = data.get('pass_to_flipperclipper', False) is True
 
     # Anything in the save folder older than this belongs to somebody else, so
     # the leftover cleanup will not touch it however it is named.
@@ -4186,6 +4195,13 @@ def download():
             for message in _cleanup_download_scraps(save_path, seen_files,
                                                     since=run_started):
                 yield f"data: {json.dumps({'log': message})}\n\n"
+
+            if download_success and pass_to_flipperclipper:
+                opened, error = open_in_flipperclipper(final_file)
+                if opened:
+                    yield f"data: {json.dumps({'log': '> [FinFetcher] Opened the video in FlipperClipper.'})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'log': '> [FinFetcher] ' + error})}\n\n"
 
             # Send final status. Every run ends with exactly one of these, so
             # "did this download fail?" is answerable from the stream itself

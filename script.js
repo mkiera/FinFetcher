@@ -10,6 +10,8 @@ let videoDuration = 0;
 let cachedVideoInfo = null;
 let cachedInfoUrl = null;
 let canSelfUpdate = true;
+let flipperClipperAvailable = false;
+let pendingPassToFlipperClipper = false;
 // True only while the download stream is open, which is the only window in
 // which /api/download/cancel has anything to act on
 let downloadInFlight = false;
@@ -90,6 +92,7 @@ async function showMainApp() {
     // Initialize main app
     selectMode(currentMode);
     loadVersion();
+    checkFlipperClipper();
 
     // Only check for updates if the user hasn't turned that off
     const settings = await loadUpdateSettings();
@@ -236,6 +239,24 @@ function selectMode(mode) {
     // Stream mode has no download to stop, and the mode cards stay clickable
     // while one is running, so the control has to follow the mode as well
     updateCancelVisibility();
+    updateFlipperClipperVisibility();
+}
+
+async function checkFlipperClipper() {
+    try {
+        const response = await fetch('/api/integrations/flipperclipper');
+        const data = await response.json();
+        flipperClipperAvailable = response.ok && data.installed === true;
+    } catch (e) {
+        flipperClipperAvailable = false;
+    }
+    updateFlipperClipperVisibility();
+}
+
+function updateFlipperClipperVisibility() {
+    const button = document.getElementById('flipperClipperBtn');
+    const show = flipperClipperAvailable && currentMode === 'video';
+    button.classList.toggle('hidden', !show);
 }
 
 // Cancel is only offered when there is something to cancel. Anything else
@@ -407,7 +428,7 @@ function populatePreviewPanel(data) {
     panel.classList.remove('hidden');
 }
 
-async function initiateDownload() {
+async function initiateDownload(passToFlipperClipper = false) {
     const urlInput = document.getElementById('urlInput');
     const url = urlInput.value.trim();
 
@@ -422,7 +443,9 @@ async function initiateDownload() {
         return;
     }
 
+    pendingPassToFlipperClipper = passToFlipperClipper;
     document.getElementById('downloadBtn').disabled = true;
+    document.getElementById('flipperClipperBtn').disabled = true;
     document.getElementById('downloadBtn').textContent = "Starting...";
 
     // Use cached info only if it was fetched for this exact URL
@@ -438,7 +461,7 @@ async function initiateDownload() {
         if (data.is_playlist) {
             document.getElementById('playlistModal').classList.remove('hidden');
         } else {
-            startDownload('single');
+            startDownload('single', pendingPassToFlipperClipper);
         }
     } else {
         resetUI();
@@ -447,7 +470,7 @@ async function initiateDownload() {
 
 function confirmDownload(type) {
     document.getElementById('playlistModal').classList.add('hidden');
-    startDownload(type);
+    startDownload(type, pendingPassToFlipperClipper);
 }
 
 // --- Trim Slider Functions ---
@@ -567,7 +590,7 @@ function parseTime(timeStr) {
 
 // --- Download Functions ---
 
-async function startDownload(type) {
+async function startDownload(type, passToFlipperClipper = false) {
     const progressArea = document.getElementById('progressArea');
     progressArea.classList.remove('hidden');
     document.getElementById('downloadBtn').textContent = "Downloading...";
@@ -640,7 +663,8 @@ async function startDownload(type) {
                 log_to_file: logToFile,
                 quality: quality,
                 trim_start: trimStart,
-                trim_end: trimEnd
+                trim_end: trimEnd,
+                pass_to_flipperclipper: passToFlipperClipper
             })
         });
 
@@ -726,6 +750,10 @@ async function cancelDownload() {
 function resetUI() {
     document.getElementById('downloadBtn').disabled = false;
     document.getElementById('downloadBtn').textContent = "Download";
+    const flipperClipperBtn = document.getElementById('flipperClipperBtn');
+    flipperClipperBtn.disabled = false;
+    flipperClipperBtn.textContent = "Pass to FlipperClipper";
+    pendingPassToFlipperClipper = false;
     toggleTrimInputs();
 
     // However the stream ended, there is no longer anything to cancel

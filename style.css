@@ -561,6 +561,27 @@ button:active {
     flex: 1;
 }
 
+button.flipperclipper-btn {
+    width: auto;
+    display: block;
+    margin: 10px auto 0;
+    padding: 8px 16px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.1);
+    box-shadow: none;
+    font-size: 0.8rem;
+    font-weight: 500;
+}
+
+button.flipperclipper-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+    box-shadow: none;
+}
+
+button.flipperclipper-btn.hidden {
+    display: none;
+}
+
 /* Same treatment as the secondary buttons in the modals — the control that
    stops the download must not compete with the one that starts it */
 .download-actions button.secondary {
