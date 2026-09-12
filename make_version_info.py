@@ -1,23 +1,11 @@
-"""Generate the Windows version resource that gets stamped into the exe.
-
-An executable with no version resource — no company, product or description —
-reads as suspicious to antivirus heuristics. Measured on VirusTotal, adding
-one removed a detection for free, and dropping UPX removed another.
-
-Built from version.txt so the number in the file properties can never drift
-from the one the app reports. A tag like "1.2.4f-media-options" becomes
-(1, 2, 4, 0) for the numeric fields, which Windows requires to be four ints,
-while the human-readable strings keep the full version.
-
-Usage: python make_version_info.py [output_path]
-"""
 import os
 import re
 import sys
 
+from versioning import read_build_version
+
 
 def numeric_version(version_string):
-    """(major, minor, patch, 0) from a version like 1.2.4f-media-options."""
     match = re.match(r'^(\d+)(?:\.(\d+))?(?:\.(\d+))?', version_string.strip().lstrip('v'))
     if not match:
         return (0, 0, 0, 0)
@@ -44,8 +32,7 @@ TEMPLATE = """VSVersionInfo(
 
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
-    with open(os.path.join(here, 'version.txt'), encoding='utf-8') as f:
-        version = f.read().strip()
+    version = read_build_version(here, os.environ.get('FINFETCHER_BUILD_VERSION'))
 
     out_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, 'version_info.txt')
     with open(out_path, 'w', encoding='utf-8') as f:

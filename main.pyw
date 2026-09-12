@@ -31,6 +31,7 @@ import uuid
 
 from flipperclipper import find_flipperclipper, open_in_flipperclipper
 from download_output import DownloadOutput
+from versioning import parse_version, is_newer
 
 
 # ---- Managed yt-dlp -------------------------------------------------------
@@ -928,39 +929,10 @@ class UpdateManager:
 
     @staticmethod
     def _parse_version(version_str):
-        """Parse a version string into a comparable tuple.
-        
-        Supports formats:
-          '1.2.3'           → stable
-          '1.2.3b'          → pre-release (legacy bugfix beta)
-          '1.2.3f-branch'   → pre-release (feature beta)
-          '1.2.3b-branch'   → pre-release (bugfix beta)
-          '1.2.3-beta'      → pre-release
-          '1.2.3-rc1'       → pre-release
-        
-        Returns (major, minor, patch, is_stable) where is_stable is 1 for
-        stable releases and 0 for pre-releases.
-        """
-        import re
-        v = version_str.strip().lstrip('v')
-        # Extract numeric major.minor.patch, treating any trailing
-        # non-numeric suffix (f-branch, b-branch, -beta, etc.) as pre-release.
-        m = re.match(r'^(\d+)(?:\.(\d+))?(?:\.(\d+))?([a-zA-Z\-].*)?$', v)
-        if not m:
-            return (0, 0, 0, 1)
-        major = int(m.group(1)) if m.group(1) else 0
-        minor = int(m.group(2)) if m.group(2) else 0
-        patch = int(m.group(3)) if m.group(3) else 0
-        is_stable = 0 if m.group(4) else 1
-        return (major, minor, patch, is_stable)
+        return parse_version(version_str)
 
     def _is_newer(self, remote_version, local_version):
-        """Check if remote_version is newer than local_version."""
-        remote = self._parse_version(remote_version)
-        local = self._parse_version(local_version)
-        # Compare (major, minor, patch, is_stable) so the stable release wins
-        # over a pre-release of the same version — 1.2.2 updates 1.2.2b-foo.
-        return remote[:4] > local[:4]
+        return is_newer(remote_version, local_version)
 
     @staticmethod
     def _is_installer_name(name):
@@ -1070,6 +1042,8 @@ class UpdateManager:
         if not force and not self._should_auto_check():
             return {'skipped': True, 'reason': 'cooldown'}
 
+        if self._config.get('update_channel') == 'alpha':
+            return {'skipped': True, 'reason': 'manual_alpha'}
         include_prerelease = self._config.get('update_channel', 'stable') == 'prerelease'
         current_version = self.get_current_version()
         self._record_check()
@@ -1102,13 +1076,18 @@ class UpdateManager:
 
                 # Skip versions older than the minimum (no updater support)
                 parsed = self._parse_version(tag)
-                if parsed[:3] < self.MIN_UPDATE_VERSION:
+                if parsed is None or parsed[:3] < self.MIN_UPDATE_VERSION:
                     continue
 
-                version = tag.lstrip('v')
+                if not parsed[3] and not include_prerelease:
+                    continue
+                is_prerelease = is_prerelease or not bool(parsed[3])
+                version = tag.removeprefix('v')
                 if self._is_newer(version, current_version):
                     if best is None or self._is_newer(version, best['version']):
                         exe_asset = self._pick_exe_asset(release.get('assets', []))
+                        if exe_asset is None:
+                            continue
 
                         best = {
                             'version': version,
@@ -2171,10 +2150,13 @@ def update_releases():
             # Skip versions older than the minimum (no updater support)
             tag = release.get('tag_name', '')
             parsed = update_manager._parse_version(tag)
-            if parsed[:3] < update_manager.MIN_UPDATE_VERSION:
+            if parsed is None or parsed[:3] < update_manager.MIN_UPDATE_VERSION:
                 continue
 
-            version = tag.lstrip('v')
+            if not parsed[3] and not include_prerelease:
+                continue
+            is_prerelease = is_prerelease or not bool(parsed[3])
+            version = tag.removeprefix('v')
 
             # Find the asset to offer — the installer when there is one
             picked = update_manager._pick_exe_asset(release.get('assets', []))
@@ -2194,9 +2176,10 @@ def update_releases():
                 'html_url': release.get('html_url', ''),
                 'published_at': release.get('published_at', ''),
                 'exe_asset': exe_asset,
-                'is_current': version == current_version,
+                'is_current': parsed == parse_version(current_version),
             })
 
+        result.sort(key=lambda row: parse_version(row['version']), reverse=True)
         return jsonify({
             'releases': result,
             'current_version': current_version,
@@ -2283,15 +2266,15 @@ def _build_alpha_artifacts():
             pass
         download_url = f'https://nightly.link/mkiera/FinFetcher/actions/runs/{run_id}/{artifact_name}.zip'
 
-        # Fetch version.txt from this commit
         version = ''
-        try:
-            ver_url = f'https://raw.githubusercontent.com/mkiera/FinFetcher/{run.get("head_sha", "")}/version.txt'
-            ver_req = Request(ver_url, headers={'User-Agent': 'FinFetcher-Updater/1.0'})
-            with urlopen(ver_req, timeout=5, context=get_ssl_context()) as ver_resp:
-                version = ver_resp.read().decode('utf-8').strip()
-        except Exception:
-            pass
+        if artifact_name != 'FinFetcher-Setup':
+            try:
+                ver_url = f'https://raw.githubusercontent.com/mkiera/FinFetcher/{run.get("head_sha", "")}/version.txt'
+                ver_req = Request(ver_url, headers={'User-Agent': 'FinFetcher-Updater/1.0'})
+                with urlopen(ver_req, timeout=5, context=get_ssl_context()) as ver_resp:
+                    version = ver_resp.read().decode('utf-8').strip()
+            except Exception:
+                pass
 
         # Run id first: a branch can be rebuilt at the same commit, and the
         # run is what the installed copy actually came out of. Commit is the

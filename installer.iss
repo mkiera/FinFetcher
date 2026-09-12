@@ -116,6 +116,7 @@ WizardStyle=modern
 ; product or description reads as suspicious to antivirus heuristics.
 VersionInfoVersion={#VersionNumeric}
 VersionInfoProductVersion={#VersionNumeric}
+VersionInfoProductTextVersion={#AppVersion}
 VersionInfoTextVersion={#AppVersion}
 VersionInfoProductName={#AppName}
 VersionInfoDescription={#AppName} Setup
