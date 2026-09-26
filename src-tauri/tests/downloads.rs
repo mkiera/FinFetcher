@@ -30,7 +30,23 @@ impl FixtureServer {
         let stop = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(AtomicUsize::new(0));
         let ranges = Arc::new(AtomicUsize::new(0));
-        let sources = Arc::new(sources);
+        let origin = format!("http://{address}");
+        let sources = Arc::new(
+            sources
+                .into_iter()
+                .map(|(path, bytes)| {
+                    let bytes = if path.ends_with(".html") {
+                        String::from_utf8(bytes)
+                            .unwrap()
+                            .replace("{{fixture_origin}}", &origin)
+                            .into_bytes()
+                    } else {
+                        bytes
+                    };
+                    (path, bytes)
+                })
+                .collect::<HashMap<_, _>>(),
+        );
         let stopping = stop.clone();
         let request_count = requests.clone();
         let range_count = ranges.clone();
@@ -1002,5 +1018,152 @@ fn real_media_options_preserve_subtitles_titles_and_cover_art() {
     assert!(
         (media_duration(&info) - 10.0).abs() < 0.15,
         "Postprocessing changed audio duration: {info}"
+    );
+}
+
+#[test]
+#[ignore = "Runs real chapter embedding/splitting and download logging with yt-dlp, FFmpeg and FFprobe on PATH."]
+fn real_chapters_and_download_logs_are_published() {
+    let root = tempfile::tempdir().unwrap();
+    let (settings, engine, ffmpeg, ffprobe) = runtime(root.path());
+    let source = root.path().join("source.mp4");
+    generate_source(&ffmpeg, &source, "mp4");
+    let metadata = json!({
+        "@context":"https://schema.org", "@type":"VideoObject",
+        "name":"Fixture Chapters", "contentUrl":"{{fixture_origin}}/source.mp4", "duration":"PT10S",
+        "hasPart":[
+            {"@type":"Clip","name":"Opening","startOffset":0,"endOffset":5},
+            {"@type":"Clip","name":"Closing","startOffset":5,"endOffset":10}
+        ]
+    });
+    let page = format!("<!doctype html><title>Fixture Chapters</title><script type=\"application/ld+json\">{metadata}</script>");
+    let server = FixtureServer::new(HashMap::from([
+        ("/source.mp4".into(), fs::read(&source).unwrap()),
+        ("/chapters.html".into(), page.into_bytes()),
+    ]));
+    settings
+        .save(&json!({"embed_chapters":true,"split_chapters":true}))
+        .unwrap();
+    let destination = root.path().join("chapter-output");
+    let events = execute(
+        &engine,
+        json!({"url":format!("http://{}/chapters.html",server.address),"save_path":destination,"log_to_file":true}),
+        |_| {},
+    );
+    assert_status(&events, "completed", "embedded and split chapters");
+    let full = destination.join("Fixture Chapters.mp4");
+    assert_published_file(&events, &full);
+    let info: Value = serde_json::from_slice(&command_bytes(
+        &ffprobe,
+        &[
+            "-v",
+            "error",
+            "-show_chapters",
+            "-show_format",
+            "-of",
+            "json",
+            &full.to_string_lossy(),
+        ],
+    ))
+    .unwrap();
+    let chapters = info["chapters"].as_array().unwrap();
+    assert_eq!(
+        chapters.len(),
+        2,
+        "Chapter embedding did not preserve both sections: {info}"
+    );
+    for (index, title) in ["Opening", "Closing"].into_iter().enumerate() {
+        let expected_start = index as f64 * 5.0;
+        let chapter = &chapters[index];
+        assert_eq!(
+            chapter["tags"]["title"], title,
+            "Chapter title changed: {chapter}"
+        );
+        let start: f64 = chapter["start_time"].as_str().unwrap().parse().unwrap();
+        let end: f64 = chapter["end_time"].as_str().unwrap().parse().unwrap();
+        assert!(
+            (start - expected_start).abs() < 0.05 && (end - expected_start - 5.0).abs() < 0.05,
+            "Chapter boundaries changed: {chapter}"
+        );
+        let split = destination.join(format!("Fixture Chapters - {:03} {title}.mp4", index + 1));
+        assert!(
+            split.is_file(),
+            "Split chapter was not published beside the full download: {}",
+            split.display()
+        );
+        let split_info = probe(&ffprobe, &split);
+        assert!(
+            (media_duration(&split_info) - 5.0).abs() < 0.2,
+            "Split chapter has the wrong duration: {split_info}"
+        );
+        let streams = split_info["streams"].as_array().unwrap();
+        assert!(
+            streams.iter().any(|stream| stream["codec_type"] == "video")
+                && streams.iter().any(|stream| stream["codec_type"] == "audio"),
+            "Chapter lost video or audio: {split_info}"
+        );
+        let expected = first_frame(&ffmpeg, &source, &expected_start.to_string());
+        let actual = first_frame(&ffmpeg, &split, "0");
+        assert_eq!(actual.len(), expected.len());
+        let difference = actual
+            .iter()
+            .zip(&expected)
+            .map(|(&actual, &expected)| (f64::from(actual) - f64::from(expected)).abs())
+            .sum::<f64>()
+            / actual.len() as f64;
+        assert!(difference < 12.0, "Chapter {title} starts at the wrong source time (mean grayscale difference {difference:.2}).");
+    }
+    assert!(
+        (media_duration(&info) - 10.0).abs() < 0.15,
+        "Splitting chapters changed the full download duration."
+    );
+    let log_path = destination.join("download_log.txt");
+    let log = fs::read_to_string(&log_path)
+        .expect("Requested download logging did not create a file beside the media.");
+    assert!(
+        log.contains("Preparing download"),
+        "Log is missing job startup: {log}"
+    );
+    assert!(
+        log.contains("[download]") && log.contains("% of ") && log.contains("ETA"),
+        "Log is missing useful transfer progress: {log}"
+    );
+    assert!(
+        log.contains("Saved to:"),
+        "Log is missing the saved destination: {log}"
+    );
+    assert_eq!(
+        fs::read_dir(&destination).unwrap().count(),
+        4,
+        "Chapter processing left unpublished or temporary files."
+    );
+
+    let events = execute(
+        &engine,
+        json!({"url":format!("http://{}/missing.mp4",server.address),"save_path":destination,"log_to_file":true}),
+        |_| {},
+    );
+    assert_status(&events, "error", "failed download with file logging");
+    let error = events
+        .iter()
+        .find_map(|event| event["error"].as_str())
+        .unwrap();
+    assert!(
+        error.contains("404"),
+        "The failure fixture did not produce its expected HTTP error: {error}"
+    );
+    let appended = fs::read_to_string(&log_path).unwrap();
+    assert!(
+        appended.starts_with(&log),
+        "A second download replaced the existing log."
+    );
+    assert!(
+        appended[log.len()..].contains(error),
+        "The failed download's actionable error was not appended to the log: {appended}"
+    );
+    assert_eq!(
+        fs::read_dir(destination).unwrap().count(),
+        4,
+        "Failed download left staged files beside the earlier successful chapter outputs."
     );
 }
