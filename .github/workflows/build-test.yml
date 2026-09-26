@@ -28,37 +28,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Node
+        uses: actions/setup-node@v4
         with:
-          python-version: '3.11'
+          node-version: '22'
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend build dependencies
+        run: npm ci
 
       - name: Prepare alpha version
         id: version
-        run: python prepare_version.py alpha --run-number ${{ github.run_number }}
+        run: node scripts/build-identity.mjs --alpha --run-number ${{ github.run_number }}
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-build.txt
+      - name: Run frontend and release tests
+        run: npm test
 
-      - name: Verify certifi is present for bundling
-        run: python -c "import certifi, os; p = certifi.where(); assert os.path.exists(p), p; print('certifi OK:', p)"
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
-      - name: Run tests
-        run: python -m unittest discover -s tests -q
+      - name: Stage frontend assets
+        run: npm run build:frontend
 
-      - name: Stamp the build with its commit and run
-        run: python make_build_info.py build_info.json
-
-      - name: Generate version resource
-        env:
-          FINFETCHER_BUILD_VERSION: ${{ steps.version.outputs.VERSION }}
-        run: python make_version_info.py version_info.txt
-
-      - name: Build app folder
-        run: |
-          python -m PyInstaller --onedir --windowed --noupx --version-file version_info.txt --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "build/version/version.txt;." --add-data "build_info.json;." --add-data "icon.ico;." --add-data "fonts;fonts" --clean --noconfirm main.pyw
+      - name: Run Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
       - name: Ensure Inno Setup is available
         shell: pwsh
@@ -66,35 +67,26 @@ jobs:
           function Find-Iscc {
             $onPath = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
             if ($onPath) { return $onPath }
-            $globs = @("${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup *\ISCC.exe")
+            $globs = @("$([Environment]::GetFolderPath('ProgramFilesX86'))\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup *\ISCC.exe")
             return (Get-ChildItem -Path $globs -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
           }
           $iscc = Find-Iscc
           if (-not $iscc) {
-            Write-Host "Inno Setup not found on this runner - installing it."
             choco install innosetup -y --no-progress
             $iscc = Find-Iscc
           }
-          if (-not $iscc) { throw "ISCC.exe still not found after installing Inno Setup" }
-          Write-Host "Using $iscc"
+          if (-not $iscc) { throw "ISCC.exe not found" }
           Add-Content -Path $env:GITHUB_ENV -Value "ISCC=$iscc"
 
-      - name: Build installer
+      - name: Verify installer migration and rollback
         shell: pwsh
         run: |
-          & "$env:ISCC" "/DVersionNumeric=${{ steps.version.outputs.VERNUM }}" "/DAppVersion=${{ steps.version.outputs.VERSION }}" installer.iss
+          ./scripts/test-installer.ps1 -Compiler "$env:ISCC"
+          ./scripts/test-uninstaller.ps1 -Compiler "$env:ISCC"
 
-      - name: Verify packaged versions
+      - name: Build application and installer
         shell: pwsh
-        env:
-          BUILD_VERSION: ${{ steps.version.outputs.VERSION }}
-        run: |
-          $bundledVersion = (Get-Content -LiteralPath 'dist/FinFetcher/_internal/version.txt' -Raw).Trim()
-          if ($bundledVersion -ne $env:BUILD_VERSION) { throw "Bundled version mismatch: $bundledVersion" }
-          foreach ($package in @('dist/FinFetcher/FinFetcher.exe', 'dist_installer/FinFetcher-Setup.exe')) {
-            $productVersion = (Get-Item -LiteralPath $package).VersionInfo.ProductVersion.Trim()
-            if ($productVersion -ne $env:BUILD_VERSION) { throw "Version mismatch in ${package}: $productVersion" }
-          }
+        run: ./scripts/build.ps1 -Prepared -SkipTests
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4

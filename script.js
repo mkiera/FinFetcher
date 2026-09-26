@@ -16,6 +16,9 @@ let destinationRequest = null;
 // True only while the download stream is open, which is the only window in
 // which /api/download/cancel has anything to act on
 let downloadInFlight = false;
+let downloadStarting = false;
+let streamRequestSequence = 0;
+const desktop = window.desktop;
 
 // Initialize - check for ffmpeg first
 checkSetup();
@@ -58,14 +61,15 @@ async function readEventStream(response, onEvent) {
             if (done) return;
         }
     } finally {
-        try { reader.cancel(); } catch (e) { /* stream already closed */ }
+        try { await reader.cancel(); } catch (e) { /* stream already closed */ }
     }
 }
 
 async function checkSetup() {
     try {
-        const response = await fetch('/api/setup/check');
+        const response = await desktop.request('/api/setup/check');
         const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Could not check required tools.');
 
         if (data.installed) {
             // FFmpeg is installed, show main app
@@ -76,8 +80,13 @@ async function checkSetup() {
         }
     } catch (e) {
         console.error('Setup check failed:', e);
-        // If check fails, try to show main app anyway
         showMainApp();
+        document.getElementById('urlStatus').textContent = e.message;
+        recordError(e.message);
+        if (!desktop.available) {
+            document.getElementById('downloadBtn').disabled = true;
+            document.getElementById('flipperClipperBtn').disabled = true;
+        }
     }
 }
 
@@ -125,7 +134,7 @@ async function installFFmpeg() {
     };
 
     try {
-        const response = await fetch('/api/setup/install-sync', { method: 'POST' });
+        const response = await desktop.request('/api/setup/install-sync', { method: 'POST' });
 
         let settled = false;
 
@@ -160,9 +169,9 @@ async function installFFmpeg() {
 
 async function browseFFmpeg() {
     try {
-        const path = await window.pywebview.api.select_folder();
+        const path = await desktop.selectFolder();
         if (path) {
-            const response = await fetch('/api/setup/browse', {
+            const response = await desktop.request('/api/setup/browse', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ path: path })
@@ -183,7 +192,7 @@ async function browseFFmpeg() {
 
 async function exitApp() {
     try {
-        await fetch('/api/setup/exit', { method: 'POST' });
+        await desktop.request('/api/setup/exit', { method: 'POST' });
     } catch (e) {
         // App should be closing
     }
@@ -192,11 +201,11 @@ async function exitApp() {
 // Load version from version.txt
 async function loadVersion() {
     try {
-        const response = await fetch('/version.txt');
+        const response = await desktop.request('/version.txt');
         const version = (await response.text()).trim();
         document.getElementById('versionDisplay').textContent = `v${version} · Made by Kiera`;
     } catch (e) {
-        document.getElementById('versionDisplay').textContent = 'v1.0.0 · Made by Kiera';
+        document.getElementById('versionDisplay').textContent = 'Version unavailable';
     }
 }
 
@@ -210,6 +219,16 @@ document.getElementById('urlInput').addEventListener('blur', async (e) => {
         // clicking Download blurs the input, so this fetch is still in flight
         cachedVideoInfo = info;
         cachedInfoUrl = info ? url : null;
+    }
+});
+
+document.getElementById('updateViewLink').addEventListener('click', async event => {
+    event.preventDefault();
+    try {
+        await desktop.openExternal(event.currentTarget.href);
+    } catch (error) {
+        recordError(error.message);
+        alert('Could not open the release page: ' + error.message);
     }
 });
 
@@ -245,7 +264,7 @@ function selectMode(mode) {
 
 async function checkFlipperClipper() {
     try {
-        const response = await fetch('/api/integrations/flipperclipper');
+        const response = await desktop.request('/api/integrations/flipperclipper');
         const data = await response.json();
         flipperClipperAvailable = response.ok && data.installed === true;
     } catch (e) {
@@ -296,7 +315,7 @@ async function fetchVideoInfo(url, preserveState = false) {
         document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Your seal is diving for metadata...</div>";
         document.getElementById('previewPanel').classList.add('hidden');
 
-        const response = await fetch('/api/info', {
+        const response = await desktop.request('/api/info', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url: url })
@@ -430,6 +449,7 @@ function populatePreviewPanel(data) {
 }
 
 async function initiateDownload(passToFlipperClipper = false) {
+    if (downloadInFlight || downloadStarting || document.getElementById('downloadBtn').disabled) return;
     const urlInput = document.getElementById('urlInput');
     const url = urlInput.value.trim();
 
@@ -592,6 +612,8 @@ function parseTime(timeStr) {
 // --- Download Functions ---
 
 async function startDownload(type, passToFlipperClipper = false) {
+    if (downloadInFlight || downloadStarting) return;
+    downloadStarting = true;
     const progressArea = document.getElementById('progressArea');
     progressArea.classList.remove('hidden');
     document.getElementById('downloadBtn').textContent = "Downloading...";
@@ -599,7 +621,6 @@ async function startDownload(type, passToFlipperClipper = false) {
     log(`Starting ${type} download...`);
     log(`Mode: ${currentMode}`);
 
-    // Collect options before folder dialog (pywebview can cause UI state issues)
     const logToFile = document.getElementById('logToggle').checked;
     const quality = document.getElementById('qualitySelect').value;
     // Trimming applies to a single file only — never send it with a playlist
@@ -631,7 +652,7 @@ async function startDownload(type, passToFlipperClipper = false) {
     if (locationToggle && locationToggle.checked) {
         log("Select download folder...");
         try {
-            savePath = await window.pywebview.api.select_folder();
+            savePath = await desktop.selectFolder();
             if (!savePath) {
                 log("Download cancelled (no folder selected).");
                 resetUI();
@@ -640,20 +661,18 @@ async function startDownload(type, passToFlipperClipper = false) {
             log(`Saving to: ${savePath}`);
         } catch (e) {
             log("Error selecting folder: " + e);
+            recordError(e.message);
+            resetUI();
+            return;
         }
     }
 
-    // Start download request.
-    // Cancel goes up NOW, not once the response starts arriving: the backend
-    // registers the job before it returns the stream, and a streaming response
-    // does not resolve fetch() until its first event — which, for a trimmed
-    // download, is not until ffmpeg has finished. Waiting for that is what left
-    // the window with a "Downloading..." button and no way to stop it.
+    downloadStarting = false;
     downloadInFlight = true;
     updateCancelVisibility();
 
     try {
-        const response = await fetch('/api/download', {
+        const response = await desktop.request('/api/download', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -672,11 +691,13 @@ async function startDownload(type, passToFlipperClipper = false) {
         if (!response.ok) {
             // The backend rejected the request outright — that's JSON, not a stream
             const err = await response.json().catch(() => ({}));
-            const reason = err.error || `HTTP ${response.status}`;
+            const reason = err.error || 'The download request was rejected.';
             log("Error: " + reason);
             recordError(reason);
         } else {
+            let settled = false;
             await readEventStream(response, (msg) => {
+                if (['completed', 'cancelled', 'error'].includes(msg.status)) settled = true;
                 if (msg.destination_request) {
                     destinationRequest = msg.destination_request;
                     document.getElementById('destinationPaths').textContent = destinationRequest.paths.join('\n');
@@ -712,10 +733,11 @@ async function startDownload(type, passToFlipperClipper = false) {
                     recordError(msg.error);
                 }
             });
+            if (!settled) throw new Error('The download ended unexpectedly. Please try again.');
         }
     } catch (e) {
-        log("Network Error: " + e.message);
-        recordError(`Network error during download: ${e.message}`);
+        log("Download error: " + e.message);
+        recordError(`Download error: ${e.message}`);
     }
 
     // Always re-enable the UI once the stream is over, however it ended
@@ -730,10 +752,10 @@ async function chooseDownloadDestination(action) {
     try {
         let path = null;
         if (action === 'folder') {
-            path = await window.pywebview.api.select_folder();
+            path = await desktop.selectFolder();
             if (!path) return;
         }
-        const response = await fetch('/api/download/destination', {
+        const response = await desktop.request('/api/download/destination', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: activeRequest.id, action, path })
@@ -771,11 +793,11 @@ async function cancelDownload() {
     };
 
     try {
-        const response = await fetch('/api/download/cancel', { method: 'POST' });
+        const response = await desktop.request('/api/download/cancel', { method: 'POST' });
         const data = await response.json().catch(() => ({}));
 
         if (!response.ok) {
-            failed(data.error || `HTTP ${response.status}`);
+            failed(data.error || 'The cancellation request was rejected.');
         } else if (!data.success) {
             // 200 without success means the backend has no download to stop,
             // so reporting the status code would say nothing useful
@@ -799,6 +821,7 @@ function resetUI() {
 
     // However the stream ended, there is no longer anything to cancel
     downloadInFlight = false;
+    downloadStarting = false;
     const cancelBtn = document.getElementById('cancelBtn');
     cancelBtn.disabled = false;
     cancelBtn.textContent = "Cancel";
@@ -818,6 +841,7 @@ function resetUI() {
 // --- Streaming Functions ---
 
 async function startStream(url) {
+    const requestSequence = ++streamRequestSequence;
     const streamModal = document.getElementById('streamModal');
     const streamTitle = document.getElementById('streamTitle');
     const streamPlayer = document.getElementById('streamPlayer');
@@ -835,13 +859,14 @@ async function startStream(url) {
     downloadBtn.textContent = 'Streaming...';
 
     try {
-        const response = await fetch('/api/stream', {
+        const response = await desktop.request('/api/stream', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url: url })
         });
 
         const data = await response.json();
+        if (requestSequence !== streamRequestSequence) return;
 
         if (data.error) {
             throw new Error(data.error);
@@ -857,6 +882,8 @@ async function startStream(url) {
         streamPlayer.onerror = () => {
             streamStatus.textContent = '❌ Playback error. Try a different video or download instead.';
             streamStatus.className = 'stream-status error';
+            downloadBtn.disabled = false;
+            downloadBtn.textContent = 'Stream';
         };
 
         // Reset button when video starts
@@ -866,6 +893,7 @@ async function startStream(url) {
         };
 
     } catch (e) {
+        if (requestSequence !== streamRequestSequence) return;
         console.error('Stream error:', e);
         recordError(e.message);
         streamTitle.textContent = 'Stream Error';
@@ -877,11 +905,14 @@ async function startStream(url) {
 }
 
 function closeStream() {
+    streamRequestSequence++;
     const streamModal = document.getElementById('streamModal');
     const streamPlayer = document.getElementById('streamPlayer');
 
     // Stop and clear video
     streamPlayer.pause();
+    streamPlayer.onerror = null;
+    streamPlayer.onplay = null;
     streamPlayer.src = '';
 
     // Hide modal
@@ -1118,7 +1149,7 @@ async function fetchReleases(channel) {
     try {
         // Alpha channel uses artifacts endpoint
         if (channel === 'alpha') {
-            const response = await fetch('/api/update/artifacts');
+            const response = await desktop.request('/api/update/artifacts');
             const data = await response.json();
 
             if (data.error) {
@@ -1182,7 +1213,7 @@ async function fetchReleases(channel) {
         }
 
         // Stable / Pre-release channels use releases endpoint
-        const response = await fetch(`/api/update/releases?channel=${channel}`);
+        const response = await desktop.request(`/api/update/releases?channel=${channel}`);
         const data = await response.json();
 
         if (data.error) {
@@ -1274,7 +1305,7 @@ async function installSelectedVersion() {
     }
 
     if (!canSelfUpdate) {
-        alert('Self-update is only available in the packaged exe — please download the new version manually.');
+        alert('Install a packaged FinFetcher release to use automatic updates.');
         return;
     }
 
@@ -1323,7 +1354,7 @@ async function checkForUpdates({ bypassCooldown = false, surfaceSkipped = false 
         const params = new URLSearchParams();
         if (bypassCooldown || surfaceSkipped) params.set('force', 'true');
 
-        const response = await fetch(`/api/update/check?${params}`);
+        const response = await desktop.request(`/api/update/check?${params}`);
         const data = await response.json();
 
         if (data.skipped) return data; // Cooldown or disabled, no need to check
@@ -1413,11 +1444,11 @@ function dismissUpdate() {
 
     // Save skipped version
     if (pendingUpdate) {
-        fetch('/api/update/settings', {
+        desktop.request('/api/update/settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ skipped_version: pendingUpdate.version })
-        });
+        }).catch(error => recordError(error.message));
     }
 }
 
@@ -1437,7 +1468,7 @@ async function startUpdate() {
     }
 
     if (!canSelfUpdate) {
-        alert('Self-update is only available in the packaged exe — please download the new version manually.');
+        alert('Install a packaged FinFetcher release to use automatic updates.');
         return;
     }
 
@@ -1464,12 +1495,12 @@ async function startUpdate() {
     };
 
     try {
-        const response = await fetch(`/api/update/download?${params}`);
+        const response = await desktop.request(`/api/update/download?${params}`);
 
         // A rejected download (e.g. untrusted host) answers with JSON, not a stream
         if (!response.ok) {
             const err = await response.json().catch(() => ({}));
-            showFailure('Update failed: ' + (err.error || `HTTP ${response.status}`));
+            showFailure('Update failed: ' + (err.error || 'The update request was rejected.'));
             return;
         }
 
@@ -1502,7 +1533,7 @@ async function startUpdate() {
         // The backend launches the installer and then exits, so from here on the
         // window simply disappears and setup runs on its own. Whether the app is
         // relaunched afterwards is the installer's call, so nothing below promises it.
-        const applyResponse = await fetch('/api/update/apply', {
+        const applyResponse = await desktop.request('/api/update/apply', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ path: downloadedPath })
@@ -1530,7 +1561,7 @@ async function startUpdate() {
 
 async function loadUpdateSettings() {
     try {
-        const response = await fetch('/api/update/settings');
+        const response = await desktop.request('/api/update/settings');
         const settings = await response.json();
 
         const autoToggle = document.getElementById('autoUpdateToggle');
@@ -1562,7 +1593,7 @@ async function saveUpdateSettings() {
     const autoCheck = document.getElementById('autoUpdateToggle').checked;
 
     try {
-        await fetch('/api/update/settings', {
+        await desktop.request('/api/update/settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1690,9 +1721,10 @@ async function loadDownloadSettings() {
     };
 
     try {
-        const response = await fetch('/api/settings');
+        const response = await desktop.request('/api/settings');
         if (!response.ok) {
-            showLoadFailure(`Couldn't load saved settings (HTTP ${response.status}) — changes won't be saved.`);
+            const data = await response.json().catch(() => ({}));
+            showLoadFailure(data.error || "Couldn't load saved settings. Changes won't be saved.");
             return null;
         }
 
@@ -1759,7 +1791,7 @@ async function saveDownloadSettings() {
 
     const statusEl = document.getElementById('downloadSettingsStatus');
     try {
-        const response = await fetch('/api/settings', {
+        const response = await desktop.request('/api/settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -1769,7 +1801,7 @@ async function saveDownloadSettings() {
         if (seq !== downloadSettingsSaveSeq) return; // a newer save won
 
         if (!response.ok || !data || !data.success) {
-            const reason = (data && data.error) || `HTTP ${response.status}`;
+            const reason = (data && data.error) || 'The settings request was rejected.';
             if (statusEl) {
                 statusEl.textContent = `Couldn't save settings: ${reason}`;
                 statusEl.className = 'update-check-status error';
@@ -1884,7 +1916,7 @@ function toggleDebug() {
 
 async function loadDebugInfo() {
     try {
-        const response = await fetch('/api/debug');
+        const response = await desktop.request('/api/debug');
         const data = await response.json();
 
         // System Info
@@ -1892,8 +1924,8 @@ async function loadDebugInfo() {
         document.getElementById('debugSystemInfo').textContent =
             `OS: ${sysInfo.os} ${sysInfo.os_version}\n` +
             `Platform: ${sysInfo.platform}\n` +
-            `Python: ${sysInfo.python_version.split(' ')[0]}\n` +
-            `Python Path: ${sysInfo.python_executable}`;
+            `Runtime: ${sysInfo.runtime} ${sysInfo.runtime_version}\n` +
+            `Application: ${sysInfo.executable}`;
 
         // Dependencies
         const deps = data.dependencies;
@@ -1920,7 +1952,7 @@ async function runDiagnostic() {
     resultEl.textContent = '🔄 Running diagnostic test...';
 
     try {
-        const response = await fetch('/api/debug/test', {
+        const response = await desktop.request('/api/debug/test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({})
@@ -1962,3 +1994,33 @@ function copyDebugInfo() {
 function recordError(message) {
     lastError = `[${new Date().toLocaleTimeString()}] ${message}`;
 }
+
+function bindControls() {
+    const actions = {
+        click: {
+            installFFmpeg, browseFFmpeg, exitApp, toggleSettings, dismissUpdate, startUpdate,
+            selectMode: element => selectMode(element.dataset.mode),
+            toggleAdvanced,
+            initiateDownload: () => initiateDownload(),
+            passToFlipperClipper: () => initiateDownload(true),
+            cancelDownload,
+            chooseDownloadDestination: element => chooseDownloadDestination(element.dataset.destination),
+            confirmDownload: element => confirmDownload(element.dataset.kind),
+            runDiagnostic, copyDebugInfo, toggleDebug, closeStream,
+            switchSettingsSection: element => switchSettingsSection(element.dataset.section),
+            switchUpdateTab: element => switchUpdateTab(element.dataset.channel),
+            refreshReleases, manualCheckForUpdates, installSelectedVersion,
+        },
+        change: {toggleTrimInputs, updateFromText, saveUpdateSettings, saveDownloadSettings},
+        input: {updateSlider: element => updateSlider(element.dataset.handle)},
+    };
+    for (const [event, handlers] of Object.entries(actions)) {
+        document.querySelectorAll(`[data-${event}]`).forEach(element => {
+            const handler = handlers[element.dataset[event]];
+            if (typeof handler !== 'function') throw new Error(`Unknown ${event} action: ${element.dataset[event]}`);
+            element.addEventListener(event, () => handler(element));
+        });
+    }
+}
+
+bindControls();
