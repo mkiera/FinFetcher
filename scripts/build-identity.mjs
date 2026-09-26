@@ -48,7 +48,7 @@ export function stampIdentity(args = {}, root = projectRoot, environment = proce
     if (args['validate-placement']) validateTagPlacement(args.tag, readGit);
     const notes = extractChangelog(readFileSync(resolve(root, 'CHANGELOG.md'), 'utf8'), version);
     mkdirSync(resolve(root, 'build'), { recursive: true });
-    writeFileSync(resolve(root, 'build/release-notes.md'), `${notes}\n\n<!-- app-notes-end -->\n\nRun FinFetcher-Setup.exe to install or update.\nFinFetcher-Legacy.exe supports updates from older portable copies.\n`);
+    writeFileSync(resolve(root, 'build/release-notes.md'), `${notes}\n\n<!-- app-notes-end -->\n\nRun FinFetcher-Setup.exe to install or update.\n`);
   } else if (args.alpha) {
     version = calculateRepositoryAlpha(aimed, Number(args['run-number'] || environment.GITHUB_RUN_NUMBER || 1), readGit);
   }

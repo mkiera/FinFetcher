@@ -111,25 +111,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload the legacy executable first
-        if: github.event_name == 'push'
-        run: gh release upload "${{ github.ref_name }}" "dist_legacy/FinFetcher-Legacy.exe"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Upload the installer
         if: github.event_name == 'push'
         run: gh release upload "${{ github.ref_name }}" "dist_installer/FinFetcher-Setup.exe"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Confirm asset order
+      - name: Confirm installer asset
         if: github.event_name == 'push'
         shell: pwsh
         run: |
           $assets = gh release view "${{ github.ref_name }}" --json assets | ConvertFrom-Json
-          $first = $assets.assets | Where-Object { $_.name.EndsWith('.exe') } | Select-Object -First 1
-          if ($first.name -ne 'FinFetcher-Legacy.exe') { throw 'Legacy executable must be the first executable asset.' }
+          $executables = @($assets.assets | Where-Object { $_.name.EndsWith('.exe') })
+          if ($executables.Count -ne 1 -or $executables[0].name -ne 'FinFetcher-Setup.exe') { throw 'Release must contain only the FinFetcher installer executable.' }
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -140,6 +134,5 @@ jobs:
           name: FinFetcher-Release-Validation
           path: |
             dist_installer/FinFetcher-Setup.exe
-            dist_legacy/FinFetcher-Legacy.exe
           if-no-files-found: error
           retention-days: 7

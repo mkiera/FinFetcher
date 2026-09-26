@@ -38,9 +38,6 @@ export function stagePayload(projectRoot = root) {
     }
   }
   writeFileSync(join(destination, 'THIRD_PARTY_LICENSES.txt'), notices.join('\n'));
-  const legacy = join(projectRoot, 'dist_legacy');
-  mkdirSync(legacy, { recursive: true });
-  cpSync(executable, join(legacy, 'FinFetcher-Legacy.exe'));
   return destination;
 }
 
