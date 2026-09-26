@@ -1,7 +1,7 @@
 # 🦭 FinFetcher
 
-A video & music downloader built with Python and PyWebView.
-Supports hundreds of sites!
+A Windows video and music downloader built with Rust and Tauri. FinFetcher uses
+yt-dlp for site extraction and FFmpeg for media processing.
 
 <p align="center">
   <img src="icon.png" width="128" alt="FinFetcher"/>
@@ -17,43 +17,91 @@ Supports hundreds of sites!
 ## Features
 
 - 🎬 **Video Download** - Download videos in various qualities (up to 4K/8K)
-- 🎵 **Audio Extraction** - Extract audio as MP3
+- 🎵 **Audio Extraction** - Save MP3, M4A, FLAC, WAV, or Opus audio
 - ▶️ **Stream Playback** - Watch videos directly without downloading
 - ✂️ **Video Trimming** - Trim videos to specific timestamps
 - 📂 **Playlist Support** - Download entire playlists
 - 🔄 **Auto-Update** - Check for and install updates directly from the app
-- 🍪 **Cookie Auth** - Bypass YouTube 403 errors with browser cookie support
+- 🍪 **Browser Cookies** - Use available browser cookies for authenticated downloads
 
 ## Download
 
 Get the latest release from the [Releases](../../releases) page.
 
-<!--
 ## Development Setup
 
-1. Install Python 3.11+
-2. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
-3. Run:
-   ```
-   python main.pyw
-   ```
-   Or use `run.bat` on Windows.
+Install Rust with the Windows MSVC toolchain, Visual Studio C++ build tools,
+Node.js 22 or later, and Microsoft Edge WebView2 Runtime. Then run:
+
+```powershell
+npm ci
+npm run dev
+```
+
+`run.bat` starts the same development workflow. Python is not required to build
+or run FinFetcher. The separately downloaded official yt-dlp executable contains
+its own runtime.
+
+Settings and managed tools remain in `%APPDATA%\FinFetcher`. To test without
+using an existing profile, pass an absolute data directory:
+
+```powershell
+npm run tauri -- dev -- --state-dir C:\Temp\FinFetcher-test
+```
+
+Automated startup checks can also pass `--hidden` to create the window without
+showing it. This does not replace testing the visible controls.
+
+FFmpeg can be selected from an existing installation or downloaded during setup.
+FinFetcher downloads yt-dlp when needed and checks for updates according to its
+settings. YouTube extraction can use a supported installed JavaScript runtime
+or an automatically downloaded Deno runtime.
+
+## Tests
+
+```powershell
+npm test
+npm run build:frontend
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+```
+
+The real-media integration test requires yt-dlp, FFmpeg, and FFprobe on PATH.
+It serves generated media over localhost and checks downloads, trimming,
+audio extraction, filename conflicts, and cancellation:
+
+```powershell
+cargo test --locked --manifest-path src-tauri/Cargo.toml --test downloads -- --ignored --nocapture
+```
+
+Tool installation tests download official executables into temporary profiles:
+
+```powershell
+cargo test --locked --manifest-path src-tauri/Cargo.toml --lib tools::tests -- --ignored --nocapture
+```
 
 ## Building
 
-### Build EXE (Windows)
-```
-build exe.bat
+Install Inno Setup 6, then build the application and installer:
+
+```powershell
+npm run build
 ```
 
-### Build ZIP (Source)
+The installer is written to `dist_installer/FinFetcher-Setup.exe`. Its AppId and
+default installation directory remain compatible with existing installations.
+Build verification checks application and installer versions. The installer
+includes Microsoft's WebView2 bootstrapper for systems without the runtime.
+
+`build exe.bat` runs the same build. To produce a portable ZIP instead:
+
+```powershell
+.\scripts\build-portable.ps1
 ```
-build zip.bat
-```
--->
+
+`version.txt` contains the intended release core. Build scripts generate the
+application's version and source identity. CI alpha builds and numbered beta
+releases use the same application and installer pipeline. Historical tags and
+release assets are retained.
 
 ## License
 
@@ -62,10 +110,6 @@ FinFetcher is licensed under the [GNU General Public License v3.0](LICENSE).
 You may use, modify and redistribute it. If you distribute a modified version,
 that version has to be under the GPL too, with its source available.
 
-GPL rather than something more permissive because of what ships inside the
-build: FinFetcher bundles [mutagen](https://github.com/quodlibet/mutagen)
-(GPL-2.0-or-later), which yt-dlp uses to write cover art into opus and flac
-files. A binary containing it cannot be distributed under MIT terms.
-
-FFmpeg is not bundled — the app downloads it on first run, so its own licence
-applies to your copy of it, not to FinFetcher.
+Third-party notices and available dependency licenses are included in the
+installer payload. yt-dlp, FFmpeg, Deno, and WebView2 retain their respective
+licenses.

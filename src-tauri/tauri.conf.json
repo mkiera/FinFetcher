@@ -1,0 +1,20 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FinFetcher",
+  "version": "1.2.10",
+  "identifier": "com.mkiera.finfetcher",
+  "build": {
+    "beforeDevCommand": "node scripts/build-frontend.mjs",
+    "beforeBuildCommand": "node scripts/build-frontend.mjs",
+    "frontendDist": "../dist-frontend"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{"label":"main","title":"FinFetcher","width":700,"height":1200,"minWidth":500,"minHeight":500,"resizable":true,"center":true}],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' https: http: data: blob:; media-src 'self' https: http: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost; font-src 'self'; object-src 'none'; frame-src 'none'",
+      "assetProtocol": {"enable":true,"scope":[]}
+    }
+  },
+  "bundle": {"active":false,"icon":["../icon.ico"]}
+}
