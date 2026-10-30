@@ -1544,6 +1544,8 @@ mod tests {
                         Err(error) => panic!("Could not accept local test request: {error}"),
                     }
                 };
+                // On Windows an accepted socket inherits the listener's non-blocking mode.
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(3)))
                     .unwrap();
@@ -1569,7 +1571,10 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.release.send(());
             if let Some(worker) = self.worker.take() {
-                worker.join().unwrap();
+                // A second panic while a failed test unwinds aborts the whole test binary.
+                if worker.join().is_err() && !std::thread::panicking() {
+                    panic!("The stalled test server panicked");
+                }
             }
         }
     }
