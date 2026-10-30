@@ -86,17 +86,24 @@ jobs:
       - name: Prepare alpha version
         run: node scripts/build-identity.mjs --alpha --run-number ${{ github.run_number }}
 
-      - name: Stage frontend assets
-        run: npm run build:frontend
-
-      - name: Build the app
+      - name: Ensure Inno Setup is available
         shell: pwsh
         run: |
-          $identity = Get-Content -LiteralPath 'build_info.json' -Raw | ConvertFrom-Json
-          $env:FINFETCHER_BUILD_VERSION = $identity.version
-          npm run tauri -- build --no-bundle --config src-tauri/build-config.json
-          if ($LASTEXITCODE -ne 0) { throw 'Application build failed.' }
+          function Find-Iscc {
+            $onPath = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
+            if ($onPath) { return $onPath }
+            $globs = @("$([Environment]::GetFolderPath('ProgramFilesX86'))\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup *\ISCC.exe")
+            return (Get-ChildItem -Path $globs -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
+          }
+          if (-not (Find-Iscc)) { choco install innosetup -y --no-progress }
+          if (-not (Find-Iscc)) { throw "ISCC.exe not found" }
+
+      - name: Build the app and installer
+        shell: pwsh
+        run: |
+          ./scripts/build.ps1 -Prepared -SkipTests
           if (-not (Test-Path src-tauri/target/release/FinFetcher.exe)) { throw 'src-tauri/target/release/FinFetcher.exe is missing' }
+          if (-not (Test-Path dist_installer/FinFetcher-Setup.exe)) { throw 'dist_installer/FinFetcher-Setup.exe is missing' }
 
       - name: Run UI checks
         shell: pwsh
@@ -105,6 +112,7 @@ jobs:
         run: |
           $filter = $env:CHECK_FILTER
           if (-not $filter) { $filter = '*' }
+          $env:FF_UI_INSTALLER = (Resolve-Path dist_installer/FinFetcher-Setup.exe).Path
           ./tests/ui-checks/Invoke-UiChecks.ps1 -AppPath src-tauri/target/release/FinFetcher.exe -OutDir ui-results -Filter $filter
 
       - name: Upload screenshots and logs
