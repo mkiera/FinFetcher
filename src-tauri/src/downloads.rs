@@ -399,7 +399,12 @@ impl Downloads {
         self.tool_args(&mut args);
         args.extend(self.cookie_args(&executable, &self.shutdown));
         args.extend(["--".into(), url.into()]);
-        let info = extract(&executable, &args, &self.shutdown)?;
+        let limit = if stream {
+            INFO_TIMEOUT
+        } else {
+            LISTING_TIMEOUT
+        };
+        let info = extract(&executable, &args, &self.shutdown, limit)?;
         if stream {
             let url = info["url"]
                 .as_str()
@@ -449,7 +454,7 @@ impl Downloads {
             self.tool_args(&mut args);
             args.extend(cookies.clone());
             args.extend(["--".into(), job.request.url.clone()]);
-            let info = extract(&executable, &args, &job.cancelled)?;
+            let info = extract(&executable, &args, &job.cancelled, LISTING_TIMEOUT)?;
             if let Some(entries) = info["entries"].as_array() {
                 urls = entries
                     .iter()
@@ -469,6 +474,7 @@ impl Downloads {
             .save_path
             .clone()
             .unwrap_or_else(default_downloads);
+        let mut failed = 0;
         for (index, (url, info)) in urls.iter().enumerate() {
             job.check()?;
             if urls.len() > 1 {
@@ -478,7 +484,7 @@ impl Downloads {
             }
             let mut request = job.request.clone();
             request.url = url.clone();
-            let final_file = self.download_one(
+            let final_file = match self.download_one(
                 &executable,
                 &request,
                 info.as_ref(),
@@ -487,7 +493,21 @@ impl Downloads {
                 &mut destination,
                 job,
                 sink,
-            )?;
+            ) {
+                Ok(file) => file,
+                Err(error)
+                    if urls.len() > 1
+                        && error != "Cancelled"
+                        && !job.cancelled.load(Ordering::Acquire) =>
+                {
+                    failed += 1;
+                    sink(
+                        json!({"log":format!("> [FinFetcher] Video {} of {} failed: {error}",index+1,urls.len())}),
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if request.pass_to_flipperclipper && request.mode == "video" {
                 if let Some(path) = final_file {
                     let message = match integrations::open_clip(&path) {
@@ -497,6 +517,12 @@ impl Downloads {
                     sink(json!({"log":format!("> [FinFetcher] {message}")}));
                 }
             }
+        }
+        if failed > 0 {
+            return Err(format!(
+                "{failed} of {} videos could not be downloaded. The log shows the reason for each.",
+                urls.len()
+            ));
         }
         Ok(())
     }
@@ -548,7 +574,18 @@ impl Downloads {
             } else {
                 metadata_args.extend(["--".into(), request.url.clone()]);
             }
-            let info = extract(executable, &metadata_args, &job.cancelled)?;
+            let info = extract(executable, &metadata_args, &job.cancelled, INFO_TIMEOUT)?;
+            if string(&info, "_type") == "playlist" || info["entries"].is_array() {
+                let title = string(&info, "title");
+                return Err(format!(
+                    "{} is a playlist, not a single video. Download its own link as a playlist.",
+                    if title.is_empty() {
+                        "This entry".to_string()
+                    } else {
+                        format!("\"{title}\"")
+                    }
+                ));
+            }
             if use_archive && archived(&info, &archive_path) {
                 sink(json!({"log":"[download] This video is already in the download archive."}));
                 return Ok(None);
@@ -872,14 +909,17 @@ impl Downloads {
     }
 }
 
-fn extract(executable: &Path, args: &[String], cancel: &AtomicBool) -> Result<Value, String> {
-    let output = process::run(
-        executable,
-        args,
-        cancel,
-        Some(Duration::from_secs(45)),
-        |_, _| {},
-    )?;
+const INFO_TIMEOUT: Duration = Duration::from_secs(45);
+// yt-dlp prints nothing while it pages through a long playlist, so only a total limit applies.
+const LISTING_TIMEOUT: Duration = Duration::from_secs(600);
+
+fn extract(
+    executable: &Path,
+    args: &[String],
+    cancel: &AtomicBool,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let output = process::run(executable, args, cancel, Some(timeout), |_, _| {})?;
     if !output.success {
         return Err(if output.error.is_empty() {
             "Could not inspect the video.".into()

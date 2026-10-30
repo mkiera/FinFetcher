@@ -3,6 +3,9 @@
 ## Unreleased
 
 - Delete the temporary copy of browser cookies when FinFetcher closes, and remove copies left by earlier sessions at startup.
+- Keep downloading the rest of a playlist when one video fails, then report how many videos failed.
+- Explain that a playlist entry is itself a playlist, such as a channel tab, instead of reporting a missing file name.
+- Allow up to 10 minutes to list a large playlist or channel instead of stopping after 45 seconds.
 
 ## 1.3.0-beta.1 - 2026-09-26
 
