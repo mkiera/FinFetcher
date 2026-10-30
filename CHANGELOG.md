@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.3.0-beta.3 - 2026-10-30
+
 - Uninstalling always removes the temporary copies of browser cookies, even when you keep your settings.
 
 ## 1.3.0-beta.2 - 2026-10-30
