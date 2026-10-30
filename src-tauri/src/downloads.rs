@@ -474,6 +474,14 @@ impl Downloads {
             .save_path
             .clone()
             .unwrap_or_else(default_downloads);
+        if job.request.pass_to_flipperclipper
+            && job.request.mode == "video"
+            && job.request.kind == "playlist"
+        {
+            sink(
+                json!({"log":"> [FinFetcher] FlipperClipper opens single videos only, so the playlist will not be passed to it."}),
+            );
+        }
         let mut failed = 0;
         for (index, (url, info)) in urls.iter().enumerate() {
             job.check()?;
@@ -508,7 +516,7 @@ impl Downloads {
                 }
                 Err(error) => return Err(error),
             };
-            if request.pass_to_flipperclipper && request.mode == "video" {
+            if opens_in_flipperclipper(&request) {
                 if let Some(path) = final_file {
                     let message = match integrations::open_clip(&path) {
                         Ok(()) => "Opened the video in FlipperClipper.".into(),
@@ -1048,6 +1056,10 @@ pub fn default_downloads() -> PathBuf {
         .join("Downloads")
 }
 
+fn opens_in_flipperclipper(request: &DownloadRequest) -> bool {
+    request.pass_to_flipperclipper && request.mode == "video" && request.kind != "playlist"
+}
+
 fn remove_stale_cookies(root: &Path) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
@@ -1123,11 +1135,19 @@ fn installed_browsers() -> Vec<&'static str> {
     .collect()
 }
 
+fn whole(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .map(|n| n as u64)
+    })
+}
+
 fn progress_event(progress: &Value) -> Value {
-    let downloaded = progress["downloaded_bytes"].as_u64().unwrap_or(0);
-    let total = progress["total_bytes"]
-        .as_u64()
-        .or_else(|| progress["total_bytes_estimate"].as_u64());
+    let downloaded = whole(&progress["downloaded_bytes"]).unwrap_or(0);
+    let total =
+        whole(&progress["total_bytes"]).or_else(|| whole(&progress["total_bytes_estimate"]));
     let percent = total
         .filter(|n| *n > 0)
         .map(|total| downloaded as f64 * 100.0 / total as f64);
@@ -1135,8 +1155,7 @@ fn progress_event(progress: &Value) -> Value {
         .as_f64()
         .map(|n| media::format_size(Some(n.max(0.0) as u64)))
         .unwrap_or_else(|| "Unknown".into());
-    let eta = progress["eta"]
-        .as_u64()
+    let eta = whole(&progress["eta"])
         .map(|n| format!("{}:{:02}", n / 60, n % 60))
         .unwrap_or_else(|| "?".into());
     json!({"log":format!("[download] {} of {} at {speed}/s ETA {eta}",percent.map(|n|format!("{n:.1}%")).unwrap_or_else(||"?".into()),media::format_size(total)),"progress":progress,"percent":percent})
@@ -1262,6 +1281,36 @@ mod tests {
         );
         assert_eq!(event["percent"], 50.0);
         assert!(event["log"].as_str().unwrap().contains("50.0%"));
+    }
+
+    #[test]
+    fn fragment_progress_uses_decimal_estimates() {
+        let event = progress_event(
+            &json!({"downloaded_bytes":1024.0,"total_bytes_estimate":2048.6,"speed":512.5,"eta":2.4}),
+        );
+        assert_eq!(event["percent"], 50.0);
+        let line = event["log"].as_str().unwrap();
+        assert!(line.contains("50.0% of 2.0 KB"), "{line}");
+        assert!(line.contains("ETA 0:02"), "{line}");
+        let exact = progress_event(
+            &json!({"downloaded_bytes":256,"total_bytes":1024,"total_bytes_estimate":4096.5}),
+        );
+        assert_eq!(exact["percent"], 25.0);
+    }
+
+    #[test]
+    fn flipperclipper_opens_single_videos_but_not_each_playlist_entry() {
+        let request = |kind: &str, mode: &str| {
+            serde_json::from_value::<DownloadRequest>(json!({"url":"https://example.com/video",
+                "type":kind,"mode":mode,"pass_to_flipperclipper":true}))
+            .unwrap()
+        };
+        assert!(opens_in_flipperclipper(&request("single", "video")));
+        assert!(!opens_in_flipperclipper(&request("single", "audio")));
+        assert!(!opens_in_flipperclipper(&request("playlist", "video")));
+        let mut unrequested = request("single", "video");
+        unrequested.pass_to_flipperclipper = false;
+        assert!(!opens_in_flipperclipper(&unrequested));
     }
 
     #[test]
