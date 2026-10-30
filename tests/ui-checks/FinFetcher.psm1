@@ -14,6 +14,7 @@ public static class FfWin32 {
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+    [DllImport("kernel32.dll", SetLastError = true)] public static extern bool GetProcessMitigationPolicy(IntPtr process, int policy, out uint value, UIntPtr size);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
 }
 "@
@@ -109,6 +110,16 @@ function Start-Ff {
     $script:Proc = Start-Process -FilePath $exe -PassThru `
         -RedirectStandardOutput (Join-Path $out 'app-stdout.txt') `
         -RedirectStandardError (Join-Path $out 'app-stderr.txt')
+    return Connect-Ff -Process $script:Proc -TimeoutSeconds $TimeoutSeconds -Width $Width -Height $Height
+}
+
+function Connect-Ff {
+    # Takes over a FinFetcher that something else started, such as Setup after an update.
+    param(
+        [Parameter(Mandatory)][System.Diagnostics.Process]$Process,
+        [int]$TimeoutSeconds = 90, [int]$Width = 760, [int]$Height = 1000
+    )
+    $script:Proc = $Process
     $window = Get-FfWindow -TimeoutSeconds $TimeoutSeconds
 
     # The configured 700x1200 window is taller than the runner's screen, which puts the lower
@@ -419,6 +430,16 @@ function Get-FfStderr {
     $stream = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
     try { return (New-Object IO.StreamReader($stream)).ReadToEnd() } finally { $stream.Dispose() }
     return ''
+}
+
+function Get-FfRedirectionGuard {
+    # $true when Windows RedirectionGuard (ProcessRedirectionTrustPolicy) is enforced on the process.
+    param([Parameter(Mandatory)][System.Diagnostics.Process]$Process)
+    $value = [uint32]0
+    if (-not [FfWin32]::GetProcessMitigationPolicy($Process.Handle, 16, [ref]$value, [UIntPtr]4)) {
+        throw "GetProcessMitigationPolicy failed for process $($Process.Id): $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    return [bool]($value -band 1)
 }
 
 function Assert-Ff {
