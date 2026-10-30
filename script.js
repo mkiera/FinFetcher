@@ -18,6 +18,7 @@ let destinationRequest = null;
 let downloadInFlight = false;
 let downloadStarting = false;
 let streamRequestSequence = 0;
+let infoRequestSequence = 0;
 const desktop = window.desktop;
 
 // Initialize - check for ffmpeg first
@@ -103,6 +104,8 @@ async function showMainApp() {
     selectMode(currentMode);
     loadVersion();
     checkFlipperClipper();
+    // The download request reads its log-to-file flag from the Settings panel
+    loadDownloadSettings();
 
     // Only check for updates if the user hasn't turned that off
     const settings = await loadUpdateSettings();
@@ -212,13 +215,11 @@ async function loadVersion() {
 // Fetch video info when URL input loses focus
 document.getElementById('urlInput').addEventListener('blur', async (e) => {
     const url = e.target.value.trim();
+    // A fetch resets the log and preview, which belong to the running download
+    if (downloadInFlight || downloadStarting) return;
     if (url && url !== currentUrl) {
         currentUrl = url;
-        const info = await fetchVideoInfo(url);
-        // Only mark the cache valid for the URL that actually produced it —
-        // clicking Download blurs the input, so this fetch is still in flight
-        cachedVideoInfo = info;
-        cachedInfoUrl = info ? url : null;
+        await fetchVideoInfo(url);
     }
 });
 
@@ -300,16 +301,23 @@ function toggleTrimInputs() {
     inputs.classList.toggle('hidden', !isChecked);
 }
 
+// Progress arrives five times a second, so an uncapped log slows the WebView over long downloads
+const LOG_LIMIT = 1000;
+
 function log(message) {
     const container = document.getElementById('logContainer');
     const entry = document.createElement('div');
     entry.className = 'log-entry';
     entry.textContent = `> ${message}`;
     container.appendChild(entry);
+    while (container.children.length > LOG_LIMIT) {
+        container.removeChild(container.firstElementChild);
+    }
     container.scrollTop = container.scrollHeight;
 }
 
 async function fetchVideoInfo(url, preserveState = false) {
+    const requestSequence = ++infoRequestSequence;
     try {
         document.getElementById('urlStatus').textContent = "🦭 Your seal is fetching...";
         document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Your seal is diving for metadata...</div>";
@@ -321,6 +329,7 @@ async function fetchVideoInfo(url, preserveState = false) {
             body: JSON.stringify({ url: url })
         });
         const data = await response.json();
+        if (requestSequence !== infoRequestSequence) return null;
 
         if (data.error) throw new Error(data.error);
 
@@ -357,8 +366,14 @@ async function fetchVideoInfo(url, preserveState = false) {
 
         document.getElementById('urlStatus').textContent = "✅ Ready to download";
         document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Ready to download! ✅</div>";
+        // Only mark the cache valid for the URL that actually produced it
+        cachedVideoInfo = data;
+        cachedInfoUrl = url;
         return data;
     } catch (e) {
+        if (requestSequence !== infoRequestSequence) return null;
+        cachedVideoInfo = null;
+        cachedInfoUrl = null;
         console.error(e);
         recordError(e.message);
         document.getElementById('urlStatus').textContent = "❌ Your seal couldn't find that";
@@ -474,8 +489,6 @@ async function initiateDownload(passToFlipperClipper = false) {
     let data = cachedVideoInfo;
     if (url !== cachedInfoUrl || !cachedVideoInfo) {
         data = await fetchVideoInfo(url, true);
-        cachedVideoInfo = data;
-        cachedInfoUrl = data ? url : null;
     }
 
     if (data) {

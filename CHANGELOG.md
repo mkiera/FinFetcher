@@ -17,6 +17,9 @@
 - Old yt-dlp versions and old update downloads are removed. The current and previous yt-dlp versions and the newest update download are kept.
 - YouTube downloads try again to install Deno a few minutes after a failed attempt, instead of running without it until FinFetcher restarts.
 - A yt-dlp copy older than 2025.11.12 is treated as missing, so FinFetcher installs its own copy instead of failing every download.
+- A saved "Log to file" setting now applies from startup, without opening Settings first.
+- The download log keeps its latest 1,000 lines, so long downloads no longer slow the app down.
+- Entering a new link while a download runs no longer clears that download's log and preview, and a slow lookup for an earlier link no longer replaces the current one.
 
 ## 1.3.0-beta.1 - 2026-09-26
 

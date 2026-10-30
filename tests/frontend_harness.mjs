@@ -59,6 +59,8 @@ export async function frontend(invoke = async () => undefined) {
             if (this.tagName === 'select' && element.tagName === 'option') this.options.push(element);
         }
         replaceChildren(...children) { this.children = children; }
+        removeChild(element) { this.children.splice(this.children.indexOf(element), 1); return element; }
+        get firstElementChild() { return this.children[0] || null; }
         focus() { document.activeElement = this; }
         pause() { this.paused = true; }
         querySelectorAll(selector) {
