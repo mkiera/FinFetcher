@@ -8,6 +8,8 @@
 - Allow up to 10 minutes to list a large playlist or channel instead of stopping after 45 seconds.
 - Open FlipperClipper only for single videos, not once for every video in a playlist.
 - Show percentage and size for HLS and other fragmented downloads instead of "? of Unknown".
+- Remove hidden `.finfetcher-stage-` folders left in the save folder by an interrupted or cancelled download, while keeping folders that hold a download FinFetcher could not save.
+- Move finished downloads into place instead of copying them, so saving a large video no longer needs two or three times its size in free space.
 - Save to the Downloads folder Windows reports, including a Downloads folder that was moved to another drive or redirected to OneDrive.
 
 ## 1.3.0-beta.1 - 2026-09-26
