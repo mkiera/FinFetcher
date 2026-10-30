@@ -4,7 +4,7 @@ __pycache__/
 download_log.txt
 debug_params_v2.txt
 
-# PyInstaller
+# Build output
 build/
 dist/
 *.spec
@@ -18,6 +18,13 @@ build_vernum.tmp
 ffmpeg/
 version_info.txt
 
-# Generated per build by make_build_info.py — committing it would ship one
-# build's commit stamp inside every later build
 build_info.json
+
+node_modules/
+dist-frontend/
+src-tauri/target/
+src-tauri/build-config.json
+src-tauri/gen/
+dist_legacy/
+payload/
+tools/

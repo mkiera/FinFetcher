@@ -1,6 +1,17 @@
 name: Build and Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or commit to package'
+        required: true
+        default: 'beta'
+        type: string
+      tag:
+        description: 'Future release tag to validate and package without publishing'
+        required: true
+        type: string
   push:
     tags:
       - 'v*'
@@ -15,178 +26,113 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.ref }}
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          # From the pinned build set, so this commit builds the same way
-          # today and in six months. requirements-build.txt pulls in
-          # requirements.txt and adds PyInstaller. certifi in particular is NOT
-          # pulled in by plain yt-dlp (it sits behind that project's "default"
-          # extra), and shipping without it broke the updater in 1.2.2.
-          pip install -r requirements-build.txt
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
 
-      - name: Verify certifi is present for bundling
-        run: python -c "import certifi, os; p = certifi.where(); assert os.path.exists(p), p; print('certifi OK:', p)"
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Get version info
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend build dependencies
+        run: npm ci
+
+      - name: Prepare release version
         id: version
-        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          BUILD_BRANCH: ${{ inputs.ref || github.ref_name }}
+        shell: pwsh
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          # Detect pre-release: matches patterns like 1.0.1b, 1.0.1b-hotfix, 1.0.1f-feature, 1.0.1-beta
-          if [[ "$VERSION" =~ [0-9][bf](-|$) ]] || [[ "$VERSION" == *"-beta"* ]]; then
-            echo "IS_BETA=true" >> $GITHUB_OUTPUT
-          else
-            echo "IS_BETA=false" >> $GITHUB_OUTPUT
-          fi
-          echo "RELEASE_NAME=FinFetcher v$VERSION" >> $GITHUB_OUTPUT
-          # The tag is the authority for what this build IS. version.txt feeds the
-          # exe's version resource, the installer's AppVersion, and what the app
-          # reports to the updater — so tagging v1.2.5 without having bumped the
-          # file would ship a build calling itself 1.2.4, which then keeps being
-          # offered its own release as an update. Write the tag in and be sure.
-          printf '%s' "$VERSION" > version.txt
-          echo "version.txt is now: $(cat version.txt)"
+          if ('${{ github.event_name }}' -eq 'push') {
+            node scripts/build-identity.mjs --tag "$env:RELEASE_TAG" --branch "$env:BUILD_BRANCH" --validate-placement
+          } else {
+            node scripts/build-identity.mjs --tag "$env:RELEASE_TAG" --branch "$env:BUILD_BRANCH"
+          }
 
-      - name: Stamp the build with its commit and run
-        run: python make_build_info.py build_info.json
+      - name: Run frontend and release tests
+        run: npm test
 
-      - name: Generate version resource
-        run: python make_version_info.py version_info.txt
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
-      # --noupx and the version resource each removed an antivirus detection on
-      # VirusTotal. UPX is a packer, which engines score on regardless of what
-      # is inside, and the runners have it on PATH so PyInstaller uses it unless
-      # told not to. --onedir removed two more and was the only variant Microsoft
-      # did not flag; it puts the exe in dist\FinFetcher\ with everything else in
-      # dist\FinFetcher\_internal\, which is where sys._MEIPASS points at run time
-      # so the --add-data files still land where main.pyw looks for them.
-      - name: Build app folder
-        run: |
-          python -m PyInstaller --onedir --windowed --noupx --version-file version_info.txt --name "FinFetcher" --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "build_info.json;." --add-data "icon.ico;." --add-data "fonts;fonts" --clean --noconfirm main.pyw
+      - name: Stage frontend assets
+        run: npm run build:frontend
 
-      # A Windows version resource needs four plain numbers, and the release tag
-      # can be something like 1.2.4f-media-options. Reuse the app's own rule for
-      # that instead of writing a second one into installer.iss.
-      - name: Derive numeric version for the installer
-        id: vernum
-        shell: bash
-        run: |
-          VERNUM=$(python -c "import make_version_info as m; print('.'.join(str(n) for n in m.numeric_version(open('version.txt', encoding='utf-8').read())))")
-          echo "VERNUM=$VERNUM" >> $GITHUB_OUTPUT
-          echo "numeric version: $VERNUM"
+      - name: Run Rust tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml
 
-      # windows-latest is expected to ship Inno Setup, but "expected to" is not a
-      # build guarantee — install it rather than fail. The resolved path is
-      # exported instead of relying on PATH, because a fresh choco shim is not
-      # visible to a step that already started.
       - name: Ensure Inno Setup is available
         shell: pwsh
         run: |
           function Find-Iscc {
             $onPath = (Get-Command iscc.exe -ErrorAction SilentlyContinue).Source
             if ($onPath) { return $onPath }
-            # Version-agnostic glob: choco installs into "Inno Setup 6" today and
-            # a later major would be "Inno Setup 7".
-            # winget installs Inno Setup per-user into %LOCALAPPDATA%\Programs,
-            # which is not Program Files - a dev machine hits that path.
-            $globs = @("${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup *\ISCC.exe")
+            $globs = @("$([Environment]::GetFolderPath('ProgramFilesX86'))\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe", "$env:LOCALAPPDATA\Programs\Inno Setup *\ISCC.exe")
             return (Get-ChildItem -Path $globs -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName)
           }
           $iscc = Find-Iscc
           if (-not $iscc) {
-            Write-Host "Inno Setup not found on this runner - installing it."
             choco install innosetup -y --no-progress
             $iscc = Find-Iscc
           }
-          if (-not $iscc) { throw "ISCC.exe still not found after installing Inno Setup" }
-          Write-Host "Using $iscc"
+          if (-not $iscc) { throw "ISCC.exe not found" }
           Add-Content -Path $env:GITHUB_ENV -Value "ISCC=$iscc"
 
-      # Packages dist\FinFetcher\ whole into dist_installer\FinFetcher-Setup.exe.
-      # AppVersion is left for the script to read out of version.txt.
-      - name: Build installer
+      - name: Verify installer migration and rollback
         shell: pwsh
         run: |
-          & "$env:ISCC" "/DVersionNumeric=${{ steps.vernum.outputs.VERNUM }}" installer.iss
+          ./scripts/test-installer.ps1 -Compiler "$env:ISCC"
+          ./scripts/test-uninstaller.ps1 -Compiler "$env:ISCC"
 
-      # A second, single-file build purely for people already running <=1.2.4.
-      # Their updater cannot be changed retroactively: it takes the FIRST asset
-      # whose name ends in .exe and moves it over its own executable. Handed the
-      # installer, it would turn the user's FinFetcher.exe into a setup program —
-      # the app would still end up installed, but their shortcuts would then
-      # point at an installer that reinstalls on every click. So the release also
-      # carries a plain exe for them, named FinFetcher-Legacy.exe so it sorts
-      # ahead of the installer and is therefore the one they take.
-      # Newer builds prefer the *setup*.exe (see _pick_exe_asset in main.pyw).
-      # Drop this once the old builds are gone.
-      - name: Build legacy single-file exe
-        run: |
-          python -m PyInstaller --onefile --windowed --noupx --version-file version_info.txt --name "FinFetcher" --distpath dist_legacy --workpath build_legacy --icon icon.ico --add-data "index.html;." --add-data "style.css;." --add-data "script.js;." --add-data "version.txt;." --add-data "build_info.json;." --add-data "icon.ico;." --add-data "fonts;fonts" --clean --noconfirm main.pyw
+      - name: Build application and installer
+        shell: pwsh
+        run: ./scripts/build.ps1 -Prepared -SkipTests
 
       - name: Create Release
+        if: github.event_name == 'push'
         id: release
         uses: softprops/action-gh-release@v1
         with:
-          name: ${{ steps.version.outputs.RELEASE_NAME }}
-          body: |
-            ## ${{ steps.version.outputs.RELEASE_NAME }}
-
-            🦭 A video & music downloader.
-
-            ### Installation
-            **`FinFetcher-Setup.exe`** is the one you want. It installs for you alone,
-            asks for no admin rights, and starts the app when it's done.
-
-            `FinFetcher-Legacy.exe` is a single-file build kept only so that
-            copies of v1.2.4 and earlier can still update themselves. It works, but
-            Windows Defender and Chrome are more likely to warn about it — the
-            installer is what scores clean.
-
-            ### Already have FinFetcher?
-            Run `FinFetcher-Setup.exe` over the top. If you were using the loose
-            `FinFetcher.exe`, delete it afterwards: the installed copy lives in
-            `%LOCALAPPDATA%\Programs\FinFetcher` and is what shortcuts and updates
-            will use from now on.
+          name: ${{ github.ref_name }}
+          body_path: build/release-notes.md
           draft: false
           prerelease: ${{ steps.version.outputs.IS_BETA == 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # The order these appear in decides what every already-shipped client
-      # downloads: those clients take the first .exe the API hands back. That
-      # order is BY NAME, not by upload time — measured, after a release where
-      # uploading the legacy exe first still listed the installer first, because
-      # "FinFetcher-Setup.exe" sorts before "FinFetcher.exe" ('-' is 0x2D, '.' is
-      # 0x2E). So the legacy build is named to sort first instead:
-      # FinFetcher-Legacy.exe < FinFetcher-Setup.exe. The step after these
-      # asserts it, because the protection rests entirely on that ordering.
-      - name: Upload the legacy exe (sorts first, so older clients take it)
-        run: |
-          mv dist_legacy/FinFetcher.exe dist_legacy/FinFetcher-Legacy.exe
-          gh release upload "${{ github.ref_name }}" "dist_legacy/FinFetcher-Legacy.exe" --clobber
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Upload the installer
-        run: gh release upload "${{ github.ref_name }}" "dist_installer/FinFetcher-Setup.exe" --clobber
+        if: github.event_name == 'push'
+        run: gh release upload "${{ github.ref_name }}" "dist_installer/FinFetcher-Setup.exe"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Confirm asset order
-        shell: bash
+      - name: Confirm installer asset
+        if: github.event_name == 'push'
+        shell: pwsh
         run: |
-          # If this ever prints the installer first, every <=1.2.4 client would
-          # swap the installer over its own exe. Fail the release instead.
-          FIRST=$(gh release view "${{ github.ref_name }}" --json assets --jq '[.assets[].name | select(endswith(".exe"))] | .[0]')
-          echo "first .exe asset: $FIRST"
-          test "$FIRST" = "FinFetcher-Legacy.exe"
+          $assets = gh release view "${{ github.ref_name }}" --json assets | ConvertFrom-Json
+          $executables = @($assets.assets | Where-Object { $_.name.EndsWith('.exe') })
+          if ($executables.Count -ne 1 -or $executables[0].name -ne 'FinFetcher-Setup.exe') { throw 'Release must contain only the FinFetcher installer executable.' }
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Save dry-run packages
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: FinFetcher-Release-Validation
+          path: |
+            dist_installer/FinFetcher-Setup.exe
+          if-no-files-found: error
+          retention-days: 7

@@ -55,13 +55,13 @@
 
                 <!-- Buttons (hidden during install) -->
                 <div id="setupButtons" class="setup-buttons">
-                    <button id="installBtn" class="primary" onclick="installFFmpeg()">
+                    <button id="installBtn" class="primary" data-click="installFFmpeg">
                         Install Automatically
                     </button>
-                    <button id="browseBtn" class="secondary" onclick="browseFFmpeg()">
+                    <button id="browseBtn" class="secondary" data-click="browseFFmpeg">
                         Browse...
                     </button>
-                    <button id="exitBtn" class="tertiary" onclick="exitApp()">
+                    <button id="exitBtn" class="tertiary" data-click="exitApp">
                         Exit
                     </button>
                 </div>
@@ -78,7 +78,7 @@
             <h1>🦭 FinFetcher</h1>
             <p>A Video & Music Extractor</p>
             <span class="version" id="versionDisplay">Loading...</span>
-            <button class="settings-gear" onclick="toggleSettings()" title="Settings">⚙️</button>
+            <button class="settings-gear" data-click="toggleSettings" title="Settings">⚙️</button>
         </header>
 
         <!-- Update Notification Banner -->
@@ -94,8 +94,8 @@
                 </div>
                 <div class="update-banner-actions">
                     <a id="updateViewLink" href="#" target="_blank" class="update-link">View on GitHub</a>
-                    <button class="update-btn-skip" onclick="dismissUpdate()">Skip</button>
-                    <button id="updateInstallBtn" class="update-btn-install" onclick="startUpdate()">Update
+                    <button class="update-btn-skip" data-click="dismissUpdate">Skip</button>
+                    <button id="updateInstallBtn" class="update-btn-install" data-click="startUpdate">Update
                         Now</button>
                 </div>
             </div>
@@ -133,22 +133,22 @@
             </div>
 
             <div class="options-grid">
-                <div class="option-card" data-mode="video" onclick="selectMode('video')">
+                <div class="option-card" data-mode="video" data-click="selectMode">
                     <div class="icon">🎬</div>
                     <span>Video</span>
                 </div>
-                <div class="option-card" data-mode="audio" onclick="selectMode('audio')">
+                <div class="option-card" data-mode="audio" data-click="selectMode">
                     <div class="icon">🎵</div>
                     <span>Audio</span>
                 </div>
-                <div class="option-card" data-mode="stream" onclick="selectMode('stream')">
+                <div class="option-card" data-mode="stream" data-click="selectMode">
                     <div class="icon">🎥</div>
                     <span>Stream</span>
                 </div>
             </div>
 
             <div class="advanced-options">
-                <div class="advanced-header" onclick="toggleAdvanced()">
+                <div class="advanced-header" data-click="toggleAdvanced">
                     <span>Advanced Options</span>
                     <span class="chevron">▼</span>
                 </div>
@@ -167,7 +167,7 @@
 
                         <div class="control-row" id="trimRow">
                             <label class="checkbox-label">
-                                <input type="checkbox" id="trimToggle" onchange="toggleTrimInputs()">
+                                <input type="checkbox" id="trimToggle" data-change="toggleTrimInputs">
                                 <span>Trim Video</span>
                             </label>
                         </div>
@@ -177,17 +177,17 @@
                                 <div class="slider-track"></div>
                                 <div class="slider-fill" id="sliderFill"></div>
                                 <input type="range" id="rangeStart" min="0" max="100" value="0" step="1"
-                                    oninput="updateSlider('start')">
+                                    data-input="updateSlider" data-handle="start">
                                 <input type="range" id="rangeEnd" min="0" max="100" value="100" step="1"
-                                    oninput="updateSlider('end')">
+                                    data-input="updateSlider" data-handle="end">
                             </div>
 
                             <div class="time-inputs-row">
                                 <input type="text" id="trimStart" placeholder="00:00" class="time-input"
-                                    onchange="updateFromText()">
+                                    data-change="updateFromText">
                                 <span>to</span>
                                 <input type="text" id="trimEnd" placeholder="End" class="time-input"
-                                    onchange="updateFromText()">
+                                    data-change="updateFromText">
                             </div>
                         </div>
                     </div>
@@ -206,11 +206,11 @@
                  edge of the row. It stays hidden until a download is actually
                  in flight - see updateCancelVisibility(). -->
             <div class="download-actions">
-                <button id="downloadBtn" onclick="initiateDownload()">Download</button>
-                <button id="cancelBtn" class="secondary hidden" onclick="cancelDownload()">Cancel</button>
+                <button id="downloadBtn" data-click="initiateDownload">Download</button>
+                <button id="cancelBtn" class="secondary hidden" data-click="cancelDownload">Cancel</button>
             </div>
             <button id="flipperClipperBtn" class="flipperclipper-btn hidden"
-                onclick="initiateDownload(true)">Pass to FlipperClipper</button>
+                data-click="passToFlipperClipper">Pass to FlipperClipper</button>
 
             <div id="progressArea" class="hidden">
                 <div class="log-container" id="logContainer">
@@ -227,9 +227,9 @@
             <p id="destinationPaths" style="white-space: pre-wrap; overflow-wrap: anywhere"></p>
             <p>Choose where to save this download before it starts.</p>
             <div class="setup-buttons" style="margin: 16px auto 0">
-                <button onclick="chooseDownloadDestination('overwrite')">Overwrite</button>
-                <button class="secondary" onclick="chooseDownloadDestination('folder')">Pick where to place it</button>
-                <button id="destinationCancel" class="secondary" onclick="chooseDownloadDestination('cancel')">Cancel</button>
+                <button data-click="chooseDownloadDestination" data-destination="overwrite">Overwrite</button>
+                <button class="secondary" data-click="chooseDownloadDestination" data-destination="folder">Pick where to place it</button>
+                <button id="destinationCancel" class="secondary" data-click="chooseDownloadDestination" data-destination="cancel">Cancel</button>
             </div>
             <p id="destinationError" role="alert"></p>
         </div>
@@ -241,8 +241,8 @@
             <h2>Playlist Detected</h2>
             <p>Do you want to download the entire playlist or just the single video?</p>
             <div class="modal-actions">
-                <button class="secondary" onclick="confirmDownload('single')">Just This Video</button>
-                <button class="primary" onclick="confirmDownload('playlist')">Download Playlist</button>
+                <button class="secondary" data-click="confirmDownload" data-kind="single">Just This Video</button>
+                <button class="primary" data-click="confirmDownload" data-kind="playlist">Download Playlist</button>
             </div>
         </div>
     </div>
@@ -265,7 +265,7 @@
 
             <div class="debug-section">
                 <h3>Test yt-dlp</h3>
-                <button onclick="runDiagnostic()" class="secondary">Run Diagnostic Test</button>
+                <button data-click="runDiagnostic" class="secondary">Run Diagnostic Test</button>
                 <div id="debugTestResult" class="debug-output"></div>
             </div>
 
@@ -275,8 +275,8 @@
             </div>
 
             <div class="debug-actions">
-                <button onclick="copyDebugInfo()" class="secondary">Copy All Info</button>
-                <button onclick="toggleDebug()" class="primary">Close</button>
+                <button data-click="copyDebugInfo" class="secondary">Copy All Info</button>
+                <button data-click="toggleDebug" class="primary">Close</button>
             </div>
         </div>
     </div>
@@ -286,7 +286,7 @@
         <div class="modal-content glass-panel stream-modal">
             <div class="stream-header">
                 <h2 id="streamTitle">Loading...</h2>
-                <button class="stream-close-btn" onclick="closeStream()">✕</button>
+                <button class="stream-close-btn" data-click="closeStream">✕</button>
             </div>
             <div class="stream-player-wrapper">
                 <video id="streamPlayer" controls autoplay playsinline></video>
@@ -317,7 +317,7 @@
             <div class="settings-sticky-top">
                 <div class="settings-header">
                     <h2>⚙️ Settings</h2>
-                    <button class="stream-close-btn" onclick="toggleSettings()">✕</button>
+                    <button class="stream-close-btn" data-click="toggleSettings">✕</button>
                 </div>
 
                 <!-- These deliberately do not share a click handler with the
@@ -325,9 +325,9 @@
                      persists the choice as a side effect. -->
                 <div class="settings-tabs section-tabs">
                     <button class="settings-tab active" data-section="updates"
-                        onclick="switchSettingsSection('updates')">Updates</button>
+                        data-click="switchSettingsSection">Updates</button>
                     <button class="settings-tab" data-section="downloads"
-                        onclick="switchSettingsSection('downloads')">Downloads</button>
+                        data-click="switchSettingsSection">Downloads</button>
                 </div>
             </div>
 
@@ -336,7 +336,7 @@
                 <div class="toggle-row">
                     <span>Auto-check for Updates</span>
                     <label class="switch small">
-                        <input type="checkbox" id="autoUpdateToggle" checked onchange="saveUpdateSettings()">
+                        <input type="checkbox" id="autoUpdateToggle" checked data-change="saveUpdateSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -345,16 +345,16 @@
 
                 <div class="settings-tabs">
                     <button class="settings-tab active" data-channel="stable"
-                        onclick="switchUpdateTab('stable')">Stable</button>
+                        data-click="switchUpdateTab">Stable</button>
                     <button class="settings-tab" data-channel="prerelease"
-                        onclick="switchUpdateTab('prerelease')">Pre-release</button>
+                        data-click="switchUpdateTab">Pre-release</button>
                     <button class="settings-tab" data-channel="alpha"
-                        onclick="switchUpdateTab('alpha')">Alpha</button>
+                        data-click="switchUpdateTab">Alpha</button>
                     <!-- Forces a fresh fetch; every plain tab click reads the
                          cache the hourly check maintains -->
                     <button class="refresh-releases-btn" id="refreshReleasesBtn"
                         title="Check GitHub for new versions now"
-                        onclick="refreshReleases()">&#x21bb;</button>
+                        data-click="refreshReleases">&#x21bb;</button>
                 </div>
                 <div id="releasesCheckedAt" class="releases-checked-at"></div>
 
@@ -368,10 +368,10 @@
                 </div>
 
                 <div class="settings-update-actions">
-                    <button class="secondary small-btn" id="checkUpdatesBtn" onclick="manualCheckForUpdates()">
+                    <button class="secondary small-btn" id="checkUpdatesBtn" data-click="manualCheckForUpdates">
                         Check for Updates
                     </button>
-                    <button class="primary small-btn" id="installSelectedBtn" onclick="installSelectedVersion()"
+                    <button class="primary small-btn" id="installSelectedBtn" data-click="installSelectedVersion"
                         disabled>
                         Update
                     </button>
@@ -392,7 +392,7 @@
                             your connection.</span>
                     </div>
                     <input type="number" id="concurrentFragments" class="settings-number" min="1" max="16"
-                        onchange="saveDownloadSettings()">
+                        data-change="saveDownloadSettings">
                 </div>
 
                 <div class="control-row">
@@ -403,7 +403,7 @@
                             itself. 0 means unlimited.</span>
                     </div>
                     <input type="number" id="rateLimitKbps" class="settings-number" min="0"
-                        onchange="saveDownloadSettings()">
+                        data-change="saveDownloadSettings">
                 </div>
 
                 <div class="toggle-row">
@@ -412,7 +412,7 @@
                         <span class="settings-hint">Skips playlist items you have already downloaded before.</span>
                     </div>
                     <label class="switch small">
-                        <input type="checkbox" id="downloadArchiveToggle" onchange="saveDownloadSettings()">
+                        <input type="checkbox" id="downloadArchiveToggle" data-change="saveDownloadSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -425,7 +425,7 @@
                             the version this build shipped with, which YouTube tends to break within weeks.</span>
                     </div>
                     <label class="switch small">
-                        <input type="checkbox" id="autoUpdateYtdlpToggle" onchange="saveDownloadSettings()">
+                        <input type="checkbox" id="autoUpdateYtdlpToggle" data-change="saveDownloadSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -437,7 +437,7 @@
                             the source. Turn off to use the regular downloader and cut the saved file.</span>
                     </div>
                     <label class="switch small">
-                        <input type="checkbox" id="fastTrimToggle" onchange="saveDownloadSettings()">
+                        <input type="checkbox" id="fastTrimToggle" data-change="saveDownloadSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -451,7 +451,7 @@
                             can still take longer.</span>
                     </div>
                     <label class="switch small">
-                        <input type="checkbox" id="preciseTrimToggle" onchange="saveDownloadSettings()">
+                        <input type="checkbox" id="preciseTrimToggle" data-change="saveDownloadSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -466,7 +466,7 @@
                         <span class="settings-hint">mkv holds almost any stream as-is; mp4 is the most portable but
                             sometimes has to re-encode to fit one in.</span>
                     </div>
-                    <select id="containerSelect" onchange="saveDownloadSettings()">
+                    <select id="containerSelect" data-change="saveDownloadSettings">
                         <option value="mp4">mp4</option>
                         <option value="mkv">mkv</option>
                         <option value="webm">webm</option>
@@ -482,7 +482,7 @@
                         <span>Format</span>
                         <span class="settings-hint">What audio-only downloads are converted to.</span>
                     </div>
-                    <select id="audioFormatSelect" onchange="saveDownloadSettings()">
+                    <select id="audioFormatSelect" data-change="saveDownloadSettings">
                         <option value="mp3">mp3</option>
                         <option value="m4a">m4a</option>
                         <option value="opus">opus</option>
@@ -496,7 +496,7 @@
                         <span>Quality</span>
                         <span class="settings-hint" id="audioQualityHint">Lower quality means a smaller file.</span>
                     </div>
-                    <select id="audioQualitySelect" onchange="saveDownloadSettings()">
+                    <select id="audioQualitySelect" data-change="saveDownloadSettings">
                         <option value="0">Best</option>
                         <option value="2">High</option>
                         <option value="5">Medium</option>
@@ -515,7 +515,7 @@
                         <span class="settings-hint">Fetches subtitle tracks along with the video.</span>
                     </div>
                     <label class="switch small">
-                        <input type="checkbox" id="subtitlesToggle" onchange="saveDownloadSettings()">
+                        <input type="checkbox" id="subtitlesToggle" data-change="saveDownloadSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -528,7 +528,7 @@
                                 track.</span>
                         </div>
                         <input type="text" id="subtitleLangs" class="settings-text" value="en"
-                            onchange="saveDownloadSettings()">
+                            data-change="saveDownloadSettings">
                     </div>
 
                     <div class="toggle-row">
@@ -538,7 +538,7 @@
                                 subtitles.</span>
                         </div>
                         <label class="switch small">
-                            <input type="checkbox" id="subtitlesAutoToggle" onchange="saveDownloadSettings()">
+                            <input type="checkbox" id="subtitlesAutoToggle" data-change="saveDownloadSettings">
                             <span class="slider round"></span>
                         </label>
                     </div>
@@ -551,7 +551,7 @@
                         </div>
                         <label class="switch small">
                             <input type="checkbox" id="embedSubtitlesToggle" checked
-                                onchange="saveDownloadSettings()">
+                                data-change="saveDownloadSettings">
                             <span class="slider round"></span>
                         </label>
                     </div>
@@ -567,7 +567,7 @@
                         <span class="settings-hint">Cuts out sections the SponsorBlock community has flagged.</span>
                     </div>
                     <label class="switch small">
-                        <input type="checkbox" id="sponsorblockToggle" onchange="saveDownloadSettings()">
+                        <input type="checkbox" id="sponsorblockToggle" data-change="saveDownloadSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -575,31 +575,31 @@
                 <div class="settings-subgroup" id="sponsorblockOptions">
                     <div class="category-grid" id="sponsorblockCategories">
                         <label class="category-chip">
-                            <input type="checkbox" value="sponsor" checked onchange="saveDownloadSettings()">
+                            <input type="checkbox" value="sponsor" checked data-change="saveDownloadSettings">
                             <span>Sponsor</span>
                         </label>
                         <label class="category-chip">
-                            <input type="checkbox" value="selfpromo" checked onchange="saveDownloadSettings()">
+                            <input type="checkbox" value="selfpromo" checked data-change="saveDownloadSettings">
                             <span>Self-promo</span>
                         </label>
                         <label class="category-chip">
-                            <input type="checkbox" value="interaction" checked onchange="saveDownloadSettings()">
+                            <input type="checkbox" value="interaction" checked data-change="saveDownloadSettings">
                             <span>Interaction</span>
                         </label>
                         <label class="category-chip">
-                            <input type="checkbox" value="intro" onchange="saveDownloadSettings()">
+                            <input type="checkbox" value="intro" data-change="saveDownloadSettings">
                             <span>Intro</span>
                         </label>
                         <label class="category-chip">
-                            <input type="checkbox" value="outro" onchange="saveDownloadSettings()">
+                            <input type="checkbox" value="outro" data-change="saveDownloadSettings">
                             <span>Outro</span>
                         </label>
                         <label class="category-chip">
-                            <input type="checkbox" value="preview" onchange="saveDownloadSettings()">
+                            <input type="checkbox" value="preview" data-change="saveDownloadSettings">
                             <span>Preview</span>
                         </label>
                         <label class="category-chip">
-                            <input type="checkbox" value="music_offtopic" onchange="saveDownloadSettings()">
+                            <input type="checkbox" value="music_offtopic" data-change="saveDownloadSettings">
                             <span>Non-music</span>
                         </label>
                     </div>
@@ -621,7 +621,7 @@
                         <span class="settings-hint">Uses the video thumbnail as cover art.</span>
                     </div>
                     <label class="switch small">
-                        <input type="checkbox" id="embedThumbnailToggle" checked onchange="saveDownloadSettings()">
+                        <input type="checkbox" id="embedThumbnailToggle" checked data-change="saveDownloadSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -632,7 +632,7 @@
                         <span class="settings-hint">Title, uploader and date, written into the file's tags.</span>
                     </div>
                     <label class="switch small">
-                        <input type="checkbox" id="embedMetadataToggle" checked onchange="saveDownloadSettings()">
+                        <input type="checkbox" id="embedMetadataToggle" checked data-change="saveDownloadSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -643,7 +643,7 @@
                         <span class="settings-hint">Chapter markers you can skip between during playback.</span>
                     </div>
                     <label class="switch small">
-                        <input type="checkbox" id="embedChaptersToggle" checked onchange="saveDownloadSettings()">
+                        <input type="checkbox" id="embedChaptersToggle" checked data-change="saveDownloadSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -655,7 +655,7 @@
                             download.</span>
                     </div>
                     <label class="switch small">
-                        <input type="checkbox" id="splitChaptersToggle" onchange="saveDownloadSettings()">
+                        <input type="checkbox" id="splitChaptersToggle" data-change="saveDownloadSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -677,7 +677,7 @@
                             the next time FinFetcher starts.</span>
                     </div>
                     <label class="switch small">
-                        <input type="checkbox" id="logToggle" onchange="saveDownloadSettings()">
+                        <input type="checkbox" id="logToggle" data-change="saveDownloadSettings">
                         <span class="slider round"></span>
                     </label>
                 </div>
@@ -689,6 +689,7 @@
         </div>
     </div>
 
+    <script src="desktop.js"></script>
     <script src="script.js"></script>
 </body>
 
