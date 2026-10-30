@@ -7,6 +7,7 @@ use std::sync::Mutex;
 pub struct Settings {
     root: PathBuf,
     values: Mutex<Value>,
+    notice: Option<String>,
 }
 
 pub fn defaults() -> Value {
@@ -27,11 +28,19 @@ impl Settings {
     pub fn new(root: PathBuf) -> Result<Self, String> {
         fs::create_dir_all(&root)
             .map_err(|e| format!("Could not open FinFetcher's settings folder: {e}"))?;
-        let values = read_config(&root.join("config.json")).unwrap_or_else(|_| json!({}));
+        let (values, notice) = load_or_recover(&root.join("config.json"));
+        if let Some(notice) = &notice {
+            eprintln!("{notice}");
+        }
         Ok(Self {
             root,
             values: Mutex::new(values),
+            notice,
         })
+    }
+
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
     }
 
     pub fn root(&self) -> &Path {
@@ -93,6 +102,33 @@ fn read_config(path: &Path) -> Result<Value, String> {
         return Err("The settings file must contain an object and was left unchanged".to_owned());
     }
     Ok(value)
+}
+
+fn load_or_recover(path: &Path) -> (Value, Option<String>) {
+    let error = match read_config(path) {
+        Ok(value) => return (value, None),
+        Err(error) => error,
+    };
+    if fs::read(path).is_err() {
+        return (
+            json!({}),
+            Some(format!("FinFetcher is using default settings. {error}")),
+        );
+    }
+    let moved = path.with_file_name(format!(
+        "config.json.corrupt-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    ));
+    let notice = match fs::rename(path, &moved) {
+        Ok(()) => format!(
+            "The settings file was damaged, so FinFetcher started with default settings. The damaged file was kept as {}.",
+            moved.display()
+        ),
+        Err(rename) => format!(
+            "FinFetcher is using default settings. {error}. It could not be moved aside: {rename}"
+        ),
+    };
+    (json!({}), Some(notice))
 }
 
 pub(crate) fn atomic_json(path: &Path, value: &Value) -> Result<(), String> {
@@ -308,11 +344,37 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_existing_settings_are_never_overwritten() {
+    fn corrupt_settings_are_kept_aside_and_saving_works_again() {
+        for damaged in [&b"{broken"[..], b"", b"[1]"] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("config.json"), damaged).unwrap();
+            let settings = Settings::new(dir.path().into()).unwrap();
+            assert_eq!(settings.get(), defaults());
+            assert!(settings.notice().unwrap().contains("config.json.corrupt-"));
+            let kept: Vec<_> = fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .filter(|name| name.starts_with("config.json.corrupt-"))
+                .collect();
+            assert_eq!(kept.len(), 1);
+            assert_eq!(fs::read(dir.path().join(&kept[0])).unwrap(), damaged);
+            settings.save(&json!({"container":"mkv"})).unwrap();
+            settings
+                .merge_raw(&json!({"update_channel":"beta"}))
+                .unwrap();
+            let reopened = Settings::new(dir.path().into()).unwrap();
+            assert!(reopened.notice().is_none());
+            assert_eq!(reopened.get()["container"], "mkv");
+            assert_eq!(reopened.raw()["update_channel"], "beta");
+        }
+    }
+
+    #[test]
+    fn settings_damaged_during_a_session_are_never_overwritten() {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("config.json"), b"{broken").unwrap();
         let settings = Settings::new(dir.path().into()).unwrap();
-        assert_eq!(settings.get(), defaults());
+        assert!(settings.notice().is_none());
+        fs::write(dir.path().join("config.json"), b"{broken").unwrap();
         assert!(settings.save(&json!({"container":"mkv"})).is_err());
         assert_eq!(
             fs::read_to_string(dir.path().join("config.json")).unwrap(),

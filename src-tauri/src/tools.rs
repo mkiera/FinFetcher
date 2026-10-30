@@ -389,13 +389,15 @@ impl Tools {
         check_cancel(cancel)?;
         rename_when_free_cancellable(stage.path(), &destination, cancel)?;
         let previous = read_json(&managed.join("active.json"));
+        let previous = previous
+            .get("directory")
+            .and_then(Value::as_str)
+            .filter(|s| safe_component(s));
         atomic_json(
             &managed.join("active.json"),
-            &json!({
-                "version":version, "directory":directory,
-                "previous":previous.get("directory").and_then(Value::as_str).filter(|s| safe_component(s)),
-            }),
+            &json!({"version":version, "directory":directory, "previous":previous}),
         )?;
+        prune_ytdlp(&managed, &[Some(directory.as_str()), previous]);
         progress(sink, "yt-dlp", 100, "yt-dlp is ready.");
         Ok(json!({"checked":true,"updated":true,"running":running,"installed":version}))
     }
@@ -1098,6 +1100,24 @@ fn newest_ytdlp(
     Ok(newest.map(|(path, _)| path))
 }
 
+fn prune_ytdlp(managed: &Path, keep: &[Option<&str>]) {
+    let Ok(entries) = fs::read_dir(managed) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.')
+            || keep.contains(&Some(name.as_ref()))
+            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            continue;
+        }
+        // Windows refuses to delete a running yt-dlp.exe, so a folder still in use stays.
+        let _ = fs::remove_dir_all(entry.path());
+    }
+}
+
 fn safe_component(value: &str) -> bool {
     !value.is_empty()
         && value != "."
@@ -1729,18 +1749,90 @@ mod tests {
     }
 
     #[test]
+    fn ytdlp_pruning_keeps_active_previous_and_staging_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("ytdlp-bin");
+        for name in ["active", "previous", "older", "oldest", ".staging-x"] {
+            fs::create_dir_all(managed.join(name)).unwrap();
+            fs::write(managed.join(name).join("yt-dlp.exe"), b"x").unwrap();
+        }
+        fs::write(managed.join("active.json"), b"{}").unwrap();
+        prune_ytdlp(&managed, &[Some("active"), Some("previous")]);
+        let mut left: Vec<_> = fs::read_dir(&managed)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![".staging-x", "active", "active.json", "previous"]
+        );
+        prune_ytdlp(&managed, &[Some("active"), None]);
+        assert!(managed.join("active").exists());
+        assert!(!managed.join("previous").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ytdlp_pruning_leaves_a_folder_whose_executable_is_running() {
+        use std::os::windows::process::CommandExt;
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("ytdlp-bin");
+        let busy = managed.join("busy");
+        fs::create_dir_all(&busy).unwrap();
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        fs::copy(system.join("ping.exe"), busy.join("yt-dlp.exe")).unwrap();
+        let mut child = std::process::Command::new(busy.join("yt-dlp.exe"))
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .creation_flags(0x08000000)
+            .spawn()
+            .unwrap();
+        prune_ytdlp(&managed, &[Some("active")]);
+        let survived = busy.join("yt-dlp.exe").exists();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(survived);
+    }
+
+    #[test]
     #[ignore = "Downloads official executables into an isolated temporary installation"]
     fn official_ytdlp_installation_is_verified_and_usable() {
         let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("ytdlp-bin");
+        for name in ["2000.01.01-stale", "2000.01.02-old", "2000.01.03-prev"] {
+            fs::create_dir_all(managed.join(name)).unwrap();
+            fs::write(managed.join(name).join(executable_name("yt-dlp")), b"old").unwrap();
+        }
+        fs::write(
+            managed.join("active.json"),
+            br#"{"directory":"2000.01.03-prev","previous":"2000.01.02-old"}"#,
+        )
+        .unwrap();
         let manager = tools(dir.path());
         let result = manager
             .update_ytdlp(true, &crate::events::silent())
             .unwrap();
         let executable = manager.ytdlp().unwrap();
-        assert!(executable.starts_with(dir.path().join("ytdlp-bin")));
+        assert!(executable.starts_with(&managed));
         assert_eq!(result["updated"], true);
         assert!(probe_version(&executable, "yt-dlp").is_ok());
         assert_eq!(result["checked"], true);
+        let active = read_json(&managed.join("active.json"));
+        assert_eq!(active["previous"], "2000.01.03-prev");
+        let mut left: Vec<_> = fs::read_dir(&managed)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "2000.01.03-prev",
+                active["directory"].as_str().unwrap(),
+                "active.json"
+            ]
+        );
     }
 
     #[test]

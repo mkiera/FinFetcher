@@ -1261,8 +1261,9 @@ async function fetchReleases(channel) {
                 row.style.cursor = 'pointer';
                 row.addEventListener('click', () => selectRelease(release, row));
 
-                // Default-select the first (most recent) non-current release
-                if (!firstSelectable) {
+                // Default-select the first (most recent) non-current release,
+                // but never one older than the running version
+                if (!firstSelectable && !release.is_downgrade) {
                     firstSelectable = { release, row };
                 }
             }
@@ -1293,6 +1294,8 @@ function selectRelease(release, rowEl) {
     // Show branch name for artifacts, version for releases
     if (release.branch) {
         btn.textContent = `Update to ${release.branch}@${release.sha}`;
+    } else if (release.is_downgrade) {
+        btn.textContent = `Downgrade to v${release.version}`;
     } else {
         btn.textContent = `Update to v${release.version}`;
     }
@@ -1306,6 +1309,11 @@ async function installSelectedVersion() {
 
     if (!canSelfUpdate) {
         alert('Install a packaged FinFetcher release to use automatic updates.');
+        return;
+    }
+
+    if (selectedRelease.is_downgrade && !confirm(
+        `v${selectedRelease.version} is older than the version you are running. Install it anyway?`)) {
         return;
     }
 
@@ -1327,6 +1335,8 @@ const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 function restartUpdateCheckTimer() {
     if (updateCheckTimer) clearInterval(updateCheckTimer);
+    updateCheckTimer = null;
+    if (!document.getElementById('autoUpdateToggle').checked) return;
     updateCheckTimer = setInterval(async () => {
         await checkForUpdates({ bypassCooldown: true });
         refreshVisibleReleaseList();
@@ -1347,12 +1357,14 @@ function refreshVisibleReleaseList() {
 // bypassCooldown: skip the server's once-an-hour gate (the cache still
 // enforces its own short floor against hammering GitHub).
 // surfaceSkipped: show the banner even for a version the user chose to skip —
-// true only for explicit user actions, never for automatic checks.
+// true only for explicit user actions, never for automatic checks. Only these
+// checks run while automatic checks are turned off.
 async function checkForUpdates({ bypassCooldown = false, surfaceSkipped = false } = {}) {
     const force = surfaceSkipped;
     try {
         const params = new URLSearchParams();
         if (bypassCooldown || surfaceSkipped) params.set('force', 'true');
+        if (surfaceSkipped) params.set('manual', 'true');
 
         const response = await desktop.request(`/api/update/check?${params}`);
         const data = await response.json();
@@ -1559,6 +1571,8 @@ async function startUpdate() {
     }
 }
 
+let settingsNoticeShown = false;
+
 async function loadUpdateSettings() {
     try {
         const response = await desktop.request('/api/update/settings');
@@ -1582,6 +1596,12 @@ async function loadUpdateSettings() {
         // Self-update only works for the packaged exe
         canSelfUpdate = settings.can_self_update !== false;
 
+        if (settings.settings_notice && !settingsNoticeShown) {
+            settingsNoticeShown = true;
+            log(settings.settings_notice);
+            recordError(settings.settings_notice);
+        }
+
         return settings;
     } catch (e) {
         console.warn('Could not load update settings:', e);
@@ -1591,6 +1611,7 @@ async function loadUpdateSettings() {
 
 async function saveUpdateSettings() {
     const autoCheck = document.getElementById('autoUpdateToggle').checked;
+    if (autoCheck !== Boolean(updateCheckTimer)) restartUpdateCheckTimer();
 
     try {
         await desktop.request('/api/update/settings', {
@@ -1603,6 +1624,7 @@ async function saveUpdateSettings() {
         });
     } catch (e) {
         console.warn('Could not save update settings:', e);
+        recordError(`Could not save update settings: ${e.message}`);
     }
 }
 

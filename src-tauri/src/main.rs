@@ -64,9 +64,8 @@ fn request(
         ("GET", "/api/update/check") => {
             let downloads = state.downloads.clone();
             std::thread::spawn(move || downloads.refresh_tools());
-            state
-                .updater
-                .check(payload["force"] == true || payload["force"] == "true")
+            let flag = |key: &str| payload[key] == true || payload[key] == "true";
+            state.updater.check(flag("force"), flag("manual"))
         }
         ("GET", "/api/update/releases") => state
             .updater
@@ -318,6 +317,8 @@ fn main() {
     if let Ok(identity) = serde_json::from_str(env!("FINFETCHER_BUILD_IDENTITY_JSON")) {
         updater.set_identity(identity);
     }
+    let pruner = updater.clone();
+    std::thread::spawn(move || pruner.prune_downloads());
     let state = Desktop {
         settings,
         tools,

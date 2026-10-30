@@ -11,6 +11,10 @@
 - Remove hidden `.finfetcher-stage-` folders left in the save folder by an interrupted or cancelled download, while keeping folders that hold a download FinFetcher could not save.
 - Move finished downloads into place instead of copying them, so saving a large video no longer needs two or three times its size in free space.
 - Save to the Downloads folder Windows reports, including a Downloads folder that was moved to another drive or redirected to OneDrive.
+- A damaged settings file is kept as a backup and replaced with default settings, so settings save and update checks work again. The log says where the backup is.
+- Releases older than the running version are no longer selected automatically. Their button reads "Downgrade to" and asks for confirmation first.
+- Turning off automatic update checks also stops the hourly check. Check for Updates still works.
+- Old yt-dlp versions and old update downloads are removed. The current and previous yt-dlp versions and the newest update download are kept.
 
 ## 1.3.0-beta.1 - 2026-09-26
 

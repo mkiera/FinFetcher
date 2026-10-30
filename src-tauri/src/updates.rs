@@ -162,7 +162,8 @@ pub fn release_rows(records: &Value, channel: &str, running: &str) -> Vec<Value>
             "is_installer":is_installer(text(&asset["name"]))}));
         Some(json!({"version":tag.strip_prefix('v').unwrap_or(tag),"tag":tag,
             "prerelease":prerelease,"html_url":record["html_url"],
-            "published_at":record["published_at"],"exe_asset":asset,"is_current":current.as_ref()==Some(&parsed)}))
+            "published_at":record["published_at"],"exe_asset":asset,"is_current":current.as_ref()==Some(&parsed),
+            "is_downgrade":current.as_ref().is_some_and(|current| parsed < *current)}))
     }).collect();
     rows.sort_by(|a, b| {
         parse_version(text(&b["version"])).cmp(&parse_version(text(&a["version"])))
@@ -265,7 +266,8 @@ impl Updater {
             matches!(v.as_str(),Some("stable"|"prerelease"|"alpha"))).unwrap_or(&json!("stable")),
             "auto_check_updates":settings["auto_check_updates"].as_bool().unwrap_or(true),
             "skipped_version":settings["skipped_version"],"current_version":self.version,
-            "can_self_update":cfg!(windows) && !cfg!(debug_assertions)})
+            "can_self_update":cfg!(windows) && !cfg!(debug_assertions),
+            "settings_notice":self.settings_store.notice()})
     }
 
     pub fn save_settings(&self, value: &Value) -> Result<Value, String> {
@@ -357,24 +359,26 @@ impl Updater {
         self.cached("releases", refresh, || self.pages("releases", None))
     }
 
-    pub fn check(&self, force: bool) -> Result<Value, String> {
+    pub fn check(&self, skip_cooldown: bool, manual: bool) -> Result<Value, String> {
         let settings = self.settings();
-        if !force && settings["auto_check_updates"] == false {
+        if !manual && settings["auto_check_updates"] == false {
             return Ok(json!({"skipped":true,"reason":"disabled"}));
         }
-        if !force && cooldown(&self.settings_store.raw()["last_update_check"]) {
+        if !skip_cooldown && !manual && cooldown(&self.settings_store.raw()["last_update_check"]) {
             return Ok(json!({"skipped":true,"reason":"cooldown"}));
         }
         if settings["update_channel"] == "alpha" {
-            if force {
+            if skip_cooldown || manual {
                 self.artifacts_refresh.store(true, Ordering::Release);
             }
             return Ok(json!({"skipped":true,"reason":"manual_alpha"}));
         }
         let (_, records) = self.records(true)?;
         self.artifacts_refresh.store(true, Ordering::Release);
-        self.settings_store
-            .merge_raw(&json!({"last_update_check":Utc::now().to_rfc3339()}))?;
+        // A settings file that cannot be written must not hide an available update.
+        let _ = self
+            .settings_store
+            .merge_raw(&json!({"last_update_check":Utc::now().to_rfc3339()}));
         let current = parse_version(&self.version);
         let update = release_rows(&records, text(&settings["update_channel"]), &self.version)
             .into_iter()
@@ -499,6 +503,31 @@ impl Updater {
             json!({"percent":100,"status":"Download complete!","success":true,"path":destination}),
         );
         Ok(destination)
+    }
+
+    pub fn prune_downloads(&self) {
+        let Ok(entries) = fs::read_dir(self.root.join("updates")) else {
+            return;
+        };
+        let mut folders: Vec<(std::time::SystemTime, PathBuf)> = entries
+            .flatten()
+            .filter(|entry| {
+                entry.file_name().to_string_lossy().starts_with("update-")
+                    && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            })
+            .map(|entry| {
+                let modified = entry
+                    .metadata()
+                    .and_then(|v| v.modified())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                (modified, entry.path())
+            })
+            .collect();
+        folders.sort();
+        folders.pop();
+        for (_, folder) in folders {
+            let _ = fs::remove_dir_all(folder);
+        }
     }
 
     pub fn apply(&self, path: &Path) -> Result<Value, String> {
@@ -868,14 +897,140 @@ mod tests {
             serde_json::from_slice(&fs::read(folder.path().join("config.json")).unwrap()).unwrap();
         assert_eq!(saved["future"]["keep"], true);
         assert_eq!(saved["ffmpeg_path"], "C:\\Media Tools");
-        assert_eq!(updater.check(false).unwrap()["reason"], "disabled");
-        assert_eq!(updater.check(true).unwrap()["reason"], "manual_alpha");
+        assert_eq!(updater.check(false, false).unwrap()["reason"], "disabled");
+        assert_eq!(updater.check(true, true).unwrap()["reason"], "manual_alpha");
         assert!(updater
             .save_settings(&json!({"update_channel":"bad"}))
             .is_err());
         assert!(updater
             .save_settings(&json!({"auto_check_updates":"false"}))
             .is_err());
+    }
+
+    fn updater_with_releases(root: &Path, running: &str, records: Value) -> Updater {
+        let settings = Arc::new(Settings::new(root.to_owned()).unwrap());
+        let updater = Updater::new(root.to_owned(), settings, running.into());
+        updater.cache.lock().unwrap().insert(
+            "releases".into(),
+            (Instant::now(), Utc::now().to_rfc3339(), records),
+        );
+        updater
+    }
+
+    #[test]
+    fn scheduled_checks_stop_when_automatic_checks_are_off() {
+        let root = tempfile::tempdir().unwrap();
+        let updater =
+            updater_with_releases(root.path(), "1.2.9", json!([release("1.2.10", false)]));
+        updater
+            .save_settings(&json!({"auto_check_updates":false}))
+            .unwrap();
+        assert_eq!(updater.check(true, false).unwrap()["reason"], "disabled");
+        assert_eq!(updater.check(false, false).unwrap()["reason"], "disabled");
+        assert_eq!(updater.check(false, true).unwrap()["available"], true);
+        updater
+            .save_settings(&json!({"auto_check_updates":true}))
+            .unwrap();
+        assert_eq!(updater.check(false, false).unwrap()["reason"], "cooldown");
+        assert_eq!(updater.check(true, false).unwrap()["available"], true);
+    }
+
+    #[test]
+    fn unwritable_settings_do_not_fail_a_successful_update_check() {
+        let root = tempfile::tempdir().unwrap();
+        let updater =
+            updater_with_releases(root.path(), "1.2.9", json!([release("1.2.10", false)]));
+        fs::write(root.path().join("config.json"), b"{broken").unwrap();
+        let result = updater.check(true, true).unwrap();
+        assert_eq!(result["available"], true);
+        assert_eq!(result["update"]["version"], "1.2.10");
+    }
+
+    #[test]
+    fn damaged_settings_are_reported_once_and_update_checks_keep_working() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("config.json"), b"").unwrap();
+        let updater =
+            updater_with_releases(root.path(), "1.2.9", json!([release("1.2.10", false)]));
+        assert!(text(&updater.settings()["settings_notice"]).contains("config.json.corrupt-"));
+        updater
+            .save_settings(&json!({"update_channel":"prerelease"}))
+            .unwrap();
+        assert_eq!(updater.check(true, true).unwrap()["available"], true);
+        let reopened = Settings::new(root.path().to_owned()).unwrap();
+        assert_eq!(reopened.raw()["update_channel"], "prerelease");
+        assert!(reopened.raw()["last_update_check"].is_string());
+        assert!(reopened.notice().is_none());
+    }
+
+    #[test]
+    fn older_releases_than_the_running_version_are_marked_as_downgrades() {
+        let records = json!([
+            release("1.2.9", false),
+            release("1.3.0-beta.1", true),
+            release("1.3.0-beta.2", true),
+            release("1.3.0", false)
+        ]);
+        let flags = |channel, running| {
+            release_rows(&records, channel, running)
+                .iter()
+                .map(|v| (text(&v["version"]).to_owned(), v["is_downgrade"] == true))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            flags("stable", "1.3.0-beta.1+stamp"),
+            vec![("1.3.0".into(), false), ("1.2.9".into(), true)]
+        );
+        assert_eq!(
+            flags("prerelease", "1.3.0-beta.1"),
+            vec![
+                ("1.3.0".into(), false),
+                ("1.3.0-beta.2".into(), false),
+                ("1.3.0-beta.1".into(), false),
+                ("1.2.9".into(), true)
+            ]
+        );
+        assert!(flags("stable", "not a version")
+            .iter()
+            .all(|(_, down)| !down));
+    }
+
+    #[test]
+    fn startup_keeps_only_the_newest_update_download() {
+        let root = tempfile::tempdir().unwrap();
+        let updates = root.path().join("updates");
+        for (index, name) in ["update-old", "update-middle", "update-new"]
+            .iter()
+            .enumerate()
+        {
+            let folder = updates.join(name);
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join("FinFetcher-Setup.exe"), executable()).unwrap();
+            let mut options = File::options();
+            options.read(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.write(true).custom_flags(0x02000000);
+            }
+            let modified =
+                std::time::UNIX_EPOCH + Duration::from_secs(1_000_000 * (index as u64 + 1));
+            options
+                .open(&folder)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+        }
+        fs::write(updates.join("update-file.txt"), b"x").unwrap();
+        fs::create_dir(updates.join("other")).unwrap();
+        let settings = Arc::new(Settings::new(root.path().to_owned()).unwrap());
+        Updater::new(root.path().to_owned(), settings, "1.2.10".into()).prune_downloads();
+        let mut left: Vec<_> = fs::read_dir(&updates)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, vec!["other", "update-file.txt", "update-new"]);
     }
 
     #[test]
