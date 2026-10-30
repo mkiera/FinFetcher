@@ -20,6 +20,7 @@
 - A saved "Log to file" setting now applies from startup, without opening Settings first.
 - The download log keeps its latest 1,000 lines, so long downloads no longer slow the app down.
 - Entering a new link while a download runs no longer clears that download's log and preview, and a slow lookup for an earlier link no longer replaces the current one.
+- Fetching a link after an in-app update no longer fails with WinError 448 on PCs whose PATH includes a folder junction.
 
 ## 1.3.0-beta.1 - 2026-09-26
 
