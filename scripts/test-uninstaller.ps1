@@ -7,8 +7,9 @@ New-Item -ItemType Directory -Path $payload | Out-Null
 & rustc --edition 2021 (Join-Path $project 'tests/fixtures/update_app.rs') -o (Join-Path $payload 'FinFetcher.exe')
 if ($LASTEXITCODE -ne 0) { throw 'Uninstaller fixture compilation failed.' }
 [IO.File]::WriteAllText((Join-Path $payload 'version.txt'), 'new')
-$managed = @('ffmpeg', 'ytdlp', 'ytdlp-bin', 'deno', 'tools', 'cache', 'webview2', 'cookies-Ab01z9')
-$preserved = @('user-video.mp4', 'cookies-personal/notes.txt', 'other/user-owned.txt')
+$managed = @('ffmpeg', 'ytdlp', 'ytdlp-bin', 'deno', 'tools', 'cache', 'webview2')
+$cookieExports = @('cookies-Ab01z9', 'cookies-4321-Ab01z9')
+$preserved = @('user-video.mp4', 'cookies-personal/notes.txt', 'cookies-12-34-Ab01z9/notes.txt', 'other/user-owned.txt')
 $silent = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/NOICONS', '/TASKS=')
 foreach ($removeData in @($false, $true)) {
     $scenario = $(if ($removeData) { 'remove-data' } else { 'retain-data' })
@@ -18,7 +19,7 @@ foreach ($removeData in @($false, $true)) {
     $name = 'FinFetcherUninstall-' + [Guid]::NewGuid().ToString('N')
     $packageId = '{{' + [Guid]::NewGuid().ToString() + '}'
     New-Item -ItemType Directory -Path $state -Force | Out-Null
-    foreach ($directory in $managed + @('updates', 'cookies')) {
+    foreach ($directory in $managed + $cookieExports + @('updates', 'cookies')) {
         New-Item -ItemType Directory -Path (Join-Path $state $directory) | Out-Null
         [IO.File]::WriteAllText((Join-Path $state "$directory/test.bin"), 'managed')
     }
@@ -44,7 +45,7 @@ foreach ($removeData in @($false, $true)) {
     foreach ($path in $managed + @('config.json')) {
         if ((Test-Path -LiteralPath (Join-Path $state $path)) -eq $removeData) { throw "Incorrect $scenario behavior for $path" }
     }
-    foreach ($path in @('updates', 'cookies')) {
+    foreach ($path in $cookieExports + @('updates', 'cookies')) {
         if (Test-Path -LiteralPath (Join-Path $state $path)) { throw "Uninstall retained temporary $path data." }
     }
     foreach ($file in $preserved) {

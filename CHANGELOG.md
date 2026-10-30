@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Uninstalling always removes the temporary copies of browser cookies, even when you keep your settings.
+
 ## 1.3.0-beta.2 - 2026-10-30
 
 - Delete the temporary copy of browser cookies when FinFetcher closes, and remove copies left by earlier sessions at startup.
