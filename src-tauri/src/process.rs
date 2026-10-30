@@ -272,7 +272,8 @@ mod tests {
                     .into(),
             ],
             &AtomicBool::new(false),
-            Some(Duration::from_secs(10)),
+            // A cold PowerShell start on CI runners has taken over 10 s.
+            Some(Duration::from_secs(60)),
             |_, _| {},
         )
         .unwrap();
