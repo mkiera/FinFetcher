@@ -80,6 +80,7 @@ pub struct Downloads {
 
 impl Downloads {
     pub fn new(tools: Arc<Tools>, settings: Arc<Settings>) -> Self {
+        remove_stale_cookies(tools.root());
         Self {
             tools,
             settings,
@@ -219,6 +220,11 @@ impl Downloads {
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
+        drop(state);
+        self.cookies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 
     pub fn run(&self, job: Arc<Job>, sink: EventSink) {
@@ -295,7 +301,7 @@ impl Downloads {
     }
 
     fn cookie_args(&self, executable: &Path, cancel: &AtomicBool) -> Vec<String> {
-        if !self.browser_cookies {
+        if !self.browser_cookies || self.shutdown.load(Ordering::Acquire) {
             return Vec::new();
         }
         let mut cached = loop {
@@ -317,7 +323,7 @@ impl Downloads {
                     break;
                 }
                 let Ok(directory) = tempfile::Builder::new()
-                    .prefix("cookies-")
+                    .prefix(&format!("cookies-{}-", std::process::id()))
                     .tempdir_in(self.tools.root())
                 else {
                     break;
@@ -1002,6 +1008,52 @@ pub fn default_downloads() -> PathBuf {
         .join("Downloads")
 }
 
+fn remove_stale_cookies(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix("cookies-") else {
+            continue;
+        };
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let owner = rest
+            .split_once('-')
+            .and_then(|(pid, _)| pid.parse::<u32>().ok());
+        // Another FinFetcher window may still be reading its own export.
+        if owner.is_some_and(|pid| pid != std::process::id() && process_running(pid)) {
+            continue;
+        }
+        let _ = fs::remove_dir_all(entry.path());
+    }
+}
+
+#[cfg(windows)]
+fn process_running(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0;
+        let running = GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32;
+        CloseHandle(handle);
+        running
+    }
+}
+
+#[cfg(not(windows))]
+fn process_running(_: u32) -> bool {
+    false
+}
+
 fn is_youtube(url: &str) -> bool {
     reqwest::Url::parse(url)
         .ok()
@@ -1087,6 +1139,57 @@ mod tests {
             events.lock().unwrap().last().unwrap()["status"],
             "cancelled"
         );
+    }
+
+    #[test]
+    fn close_deletes_the_exported_browser_cookies() {
+        let root = tempfile::tempdir().unwrap();
+        let engine = engine(root.path());
+        let exported = tempfile::Builder::new()
+            .prefix(&format!("cookies-{}-", std::process::id()))
+            .tempdir_in(root.path())
+            .unwrap();
+        let folder = exported.path().to_owned();
+        fs::write(folder.join("cookies.txt"), "# Netscape HTTP Cookie File\n").unwrap();
+        *engine.cookies.lock().unwrap() = Some(Some(exported));
+        engine.close();
+        assert!(!folder.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_removes_cookie_exports_left_by_ended_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let mut running = process::command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .spawn()
+            .unwrap();
+        let legacy = root.path().join("cookies-AbC123");
+        let reused = root
+            .path()
+            .join(format!("cookies-{}-AbC123", std::process::id()));
+        let ended = root.path().join("cookies-4294967292-AbC123");
+        let live = root.path().join(format!("cookies-{}-AbC123", running.id()));
+        for folder in [&legacy, &reused, &ended, &live] {
+            fs::create_dir(folder).unwrap();
+            fs::write(folder.join("cookies.txt"), "secret").unwrap();
+        }
+        fs::create_dir(root.path().join("ytdlp-bin")).unwrap();
+        fs::write(root.path().join("cookies-note.txt"), "kept").unwrap();
+        let _engine = engine(root.path());
+        let _ = running.kill();
+        let _ = running.wait();
+        assert!(!legacy.exists());
+        assert!(!reused.exists());
+        assert!(!ended.exists());
+        assert!(live.join("cookies.txt").is_file());
+        assert!(root.path().join("ytdlp-bin").is_dir());
+        assert!(root.path().join("cookies-note.txt").is_file());
     }
 
     #[test]

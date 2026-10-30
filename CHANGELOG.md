@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Delete the temporary copy of browser cookies when FinFetcher closes, and remove copies left by earlier sessions at startup.
+
 ## 1.3.0-beta.1 - 2026-09-26
 
 - Replace the Python desktop application with a Rust and Tauri application while retaining the existing interface and settings.
