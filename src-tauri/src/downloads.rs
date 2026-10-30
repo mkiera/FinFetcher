@@ -1049,11 +1049,46 @@ fn entry_url(entry: &Value) -> Option<String> {
 }
 
 pub fn default_downloads() -> PathBuf {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Downloads")
+    downloads_folder(
+        known_downloads(),
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")),
+    )
+}
+
+fn downloads_folder(known: Option<PathBuf>, profile: Option<std::ffi::OsString>) -> PathBuf {
+    known
+        .filter(|folder| folder.is_absolute())
+        .unwrap_or_else(|| {
+            profile
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+                .join("Downloads")
+        })
+}
+
+#[cfg(windows)]
+fn known_downloads() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{FOLDERID_Downloads, SHGetKnownFolderPath},
+    };
+    let mut path = std::ptr::null_mut();
+    let result =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_Downloads, 0, std::ptr::null_mut(), &mut path) };
+    let folder = (result >= 0 && !path.is_null()).then(|| unsafe {
+        let length = (0..).take_while(|&i| *path.add(i) != 0).count();
+        PathBuf::from(std::ffi::OsString::from_wide(std::slice::from_raw_parts(
+            path, length,
+        )))
+    });
+    unsafe { CoTaskMemFree(path as _) };
+    folder
+}
+
+#[cfg(not(windows))]
+fn known_downloads() -> Option<PathBuf> {
+    None
 }
 
 fn opens_in_flipperclipper(request: &DownloadRequest) -> bool {
@@ -1164,6 +1199,27 @@ fn progress_event(progress: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_folder_prefers_the_windows_downloads_location() {
+        let moved = PathBuf::from(r"D:\Moved\Downloads");
+        let profile = Some(r"C:\Users\Someone".into());
+        assert_eq!(
+            downloads_folder(Some(moved.clone()), profile.clone()),
+            moved
+        );
+        assert_eq!(
+            downloads_folder(None, profile.clone()),
+            Path::new(r"C:\Users\Someone").join("Downloads")
+        );
+        assert_eq!(
+            downloads_folder(Some("Downloads".into()), profile),
+            Path::new(r"C:\Users\Someone").join("Downloads")
+        );
+        #[cfg(windows)]
+        assert_eq!(default_downloads(), known_downloads().unwrap());
+    }
+
     fn engine(root: &Path) -> Downloads {
         let settings = Arc::new(Settings::new(root.to_owned()).unwrap());
         let tools = Arc::new(Tools::new(root.to_owned(), settings.clone()));

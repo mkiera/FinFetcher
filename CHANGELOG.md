@@ -8,6 +8,7 @@
 - Allow up to 10 minutes to list a large playlist or channel instead of stopping after 45 seconds.
 - Open FlipperClipper only for single videos, not once for every video in a playlist.
 - Show percentage and size for HLS and other fragmented downloads instead of "? of Unknown".
+- Save to the Downloads folder Windows reports, including a Downloads folder that was moved to another drive or redirected to OneDrive.
 
 ## 1.3.0-beta.1 - 2026-09-26
 
