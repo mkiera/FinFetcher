@@ -519,7 +519,7 @@ impl Updater {
             .filter(|entry| {
                 entry.file_name().to_string_lossy().starts_with("update-")
                     && entry.file_type().is_ok_and(|kind| kind.is_dir())
-                    && crate::output::unused(&entry.path())
+                    && crate::output::claim(&entry.path()).is_some()
             })
             .map(|entry| {
                 let modified = entry

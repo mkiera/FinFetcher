@@ -146,8 +146,7 @@ impl DownloadOutput {
         // The marker goes in while the lock still keeps remove_leftovers in other windows away.
         let marked = fs::write(directory.join(KEPT_MARKER), b"").is_ok()
             && directory.join(KEPT_MARKER).is_file();
-        self.lock.take();
-        if !marked {
+        if let (false, Some(lock)) = (marked, &self.lock) {
             let name = directory
                 .file_name()
                 .map(|name| {
@@ -156,10 +155,11 @@ impl DownloadOutput {
                 })
                 .unwrap_or_default();
             let renamed = directory.with_file_name(name);
-            if fs::rename(&directory, &renamed).is_ok() {
+            if rename_held(lock, &directory, &renamed).is_ok() {
                 directory = renamed;
             }
         }
+        self.lock.take();
         format!("{message} The new download is in {}", directory.display())
     }
 
@@ -392,11 +392,12 @@ fn move_file(from: &Path, to: &Path) -> io::Result<()> {
 pub(crate) fn hold(folder: &Path) -> io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
-    // Leaving out FILE_SHARE_DELETE is what marks the folder as in use for unused().
+    // Leaving out FILE_SHARE_DELETE is what marks the folder as in use for claim().
+    // DELETE access lets rename_held move the folder without letting go of it.
     fs::OpenOptions::new()
-        .read(true)
+        .access_mode(FILE_GENERIC_READ | DELETE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(folder)
@@ -408,7 +409,43 @@ pub(crate) fn hold(folder: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(windows)]
-pub(crate) fn unused(folder: &Path) -> bool {
+fn rename_held(folder: &fs::File, _: &Path, to: &Path) -> io::Result<()> {
+    use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
+    };
+    let name: Vec<u16> = to.as_os_str().encode_wide().collect();
+    let size = std::mem::offset_of!(FILE_RENAME_INFO, FileName) + (name.len() + 1) * 2;
+    let mut buffer = vec![0u64; size.div_ceil(8)];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: the zeroed buffer holds the header plus the name and its terminator.
+    let renamed = unsafe {
+        (*info).FileNameLength = (name.len() * 2) as u32;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            name.len(),
+        );
+        SetFileInformationByHandle(
+            folder.as_raw_handle(),
+            FileRenameInfo,
+            info.cast(),
+            size as u32,
+        )
+    };
+    if renamed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn rename_held(_: &fs::File, from: &Path, to: &Path) -> io::Result<()> {
+    fs::rename(from, to)
+}
+
+#[cfg(windows)]
+pub(crate) fn claim(folder: &Path) -> Option<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -418,12 +455,12 @@ pub(crate) fn unused(folder: &Path) -> bool {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(folder)
-        .is_ok()
+        .ok()
 }
 
 #[cfg(not(windows))]
-pub(crate) fn unused(_: &Path) -> bool {
-    false
+pub(crate) fn claim(_: &Path) -> Option<fs::File> {
+    None
 }
 
 fn remove_leftovers(destination: &Path) {
@@ -437,10 +474,14 @@ fn remove_leftovers(destination: &Path) {
             .to_string_lossy()
             .starts_with(STAGING_PREFIX)
             && entry.file_type().is_ok_and(|kind| kind.is_dir())
-            && !path.join(KEPT_MARKER).is_file()
-            && unused(&path)
         {
-            let _ = fs::remove_dir_all(&path);
+            // The claim stops a download from holding the folder, so the marker check stays true.
+            let Some(_claim) = claim(&path) else {
+                continue;
+            };
+            if !path.join(KEPT_MARKER).is_file() {
+                let _ = fs::remove_dir_all(&path);
+            }
         }
     }
 }
@@ -702,6 +743,20 @@ mod tests {
         assert!(!saved.exists());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_claims_and_download_holds_exclude_each_other() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join(".finfetcher-stage-AbC123");
+        fs::create_dir(&folder).unwrap();
+        let held = hold(&folder).unwrap();
+        assert!(claim(&folder).is_none());
+        drop(held);
+        let claimed = claim(&folder).unwrap();
+        assert!(hold(&folder).is_err());
+        drop(claimed);
+    }
+
     #[test]
     fn a_kept_download_survives_cleanup_when_its_marker_cannot_be_written() {
         let directory = tempfile::tempdir().unwrap();
@@ -714,6 +769,11 @@ mod tests {
                 .unwrap()
                 .1,
         );
+        assert!(kept
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(KEPT_PREFIX));
         let _next = DownloadOutput::new(directory.path()).unwrap();
         assert_eq!(fs::read(kept.join("clip.mp4")).unwrap(), b"kept");
     }
