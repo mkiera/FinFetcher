@@ -15,6 +15,9 @@ const FFMPEG_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-esse
 const MAX_DOWNLOAD: u64 = 768 * 1024 * 1024;
 const MAX_BINARY: u64 = 512 * 1024 * 1024;
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 3600);
+const RUNTIME_RETRY: Duration = Duration::from_secs(5 * 60);
+// --js-runtimes first shipped in yt-dlp 2025.11.12.
+const MIN_YTDLP: &str = "2025.11.12";
 
 #[derive(Clone)]
 struct CachedBinary {
@@ -28,7 +31,7 @@ pub struct Tools {
     settings: Arc<Settings>,
     versions: Mutex<HashMap<PathBuf, CachedBinary>>,
     install: Mutex<()>,
-    runtime_attempt: Mutex<Option<Result<(), String>>>,
+    runtime_attempt: Mutex<Option<(Instant, Result<(), String>)>>,
     ytdlp_check: Mutex<Option<Instant>>,
     last_result: Mutex<Value>,
     discovery_override: Option<Vec<PathBuf>>,
@@ -423,13 +426,15 @@ impl Tools {
             return Ok(());
         }
         let mut attempt = cancellable_lock(&self.runtime_attempt, cancel)?;
-        if let Some(result) = &*attempt {
-            return result.clone();
+        if let Some((at, result)) = &*attempt {
+            if result.is_ok() || at.elapsed() < RUNTIME_RETRY {
+                return result.clone();
+            }
         }
         let _install = cancellable_lock(&self.install, cancel)?;
         let result = install();
         if !result.as_ref().is_err_and(|error| error == "Cancelled") {
-            *attempt = Some(result.clone());
+            *attempt = Some((Instant::now(), result.clone()));
         }
         result
     }
@@ -1087,7 +1092,7 @@ fn newest_ytdlp(
 ) -> Result<Option<PathBuf>, String> {
     let mut newest: Option<(PathBuf, String)> = None;
     for path in paths {
-        let Some(version) = validate(&path)? else {
+        let Some(version) = validate(&path)?.filter(|version| !is_newer(MIN_YTDLP, version)) else {
             continue;
         };
         if newest
@@ -1260,6 +1265,33 @@ mod tests {
             .unwrap(),
             Some(PathBuf::from("previous"))
         );
+    }
+
+    #[test]
+    fn ytdlp_older_than_the_minimum_counts_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = tools(dir.path());
+        let path = dir.path().join("bin").join(executable_name("yt-dlp"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"not run").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        for (version, usable) in [
+            ("2024.04.09", false),
+            ("2025.10.22", false),
+            ("2025.11.11.235959", false),
+            ("2025.11.12", true),
+            ("2026.10.26", true),
+        ] {
+            manager.versions.lock().unwrap().insert(
+                path.clone(),
+                CachedBinary {
+                    length: metadata.len(),
+                    modified: metadata.modified().ok(),
+                    version: version.to_owned(),
+                },
+            );
+            assert_eq!(manager.ytdlp().is_some(), usable, "{version}");
+        }
     }
 
     #[test]
@@ -1540,6 +1572,40 @@ mod tests {
                 worker.join().unwrap();
             }
         }
+    }
+
+    #[test]
+    fn a_failed_runtime_install_is_retried_after_a_short_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = tools(dir.path());
+        let attempts = std::cell::Cell::new(0);
+        let failing = || {
+            attempts.set(attempts.get() + 1);
+            Err("offline".to_owned())
+        };
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            manager.ensure_runtime_with(&cancel, failing).unwrap_err(),
+            "offline"
+        );
+        assert_eq!(
+            manager.ensure_runtime_with(&cancel, failing).unwrap_err(),
+            "offline"
+        );
+        assert_eq!(attempts.get(), 1);
+        let expired = Instant::now()
+            .checked_sub(RUNTIME_RETRY + Duration::from_secs(1))
+            .unwrap();
+        manager.runtime_attempt.lock().unwrap().as_mut().unwrap().0 = expired;
+        let succeeding = || {
+            attempts.set(attempts.get() + 1);
+            Ok(())
+        };
+        assert!(manager.ensure_runtime_with(&cancel, succeeding).is_ok());
+        assert_eq!(attempts.get(), 2);
+        manager.runtime_attempt.lock().unwrap().as_mut().unwrap().0 = expired;
+        assert!(manager.ensure_runtime_with(&cancel, failing).is_ok());
+        assert_eq!(attempts.get(), 2);
     }
 
     #[test]

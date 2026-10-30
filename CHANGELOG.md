@@ -15,6 +15,8 @@
 - Releases older than the running version are no longer selected automatically. Their button reads "Downgrade to" and asks for confirmation first.
 - Turning off automatic update checks also stops the hourly check. Check for Updates still works.
 - Old yt-dlp versions and old update downloads are removed. The current and previous yt-dlp versions and the newest update download are kept.
+- YouTube downloads try again to install Deno a few minutes after a failed attempt, instead of running without it until FinFetcher restarts.
+- A yt-dlp copy older than 2025.11.12 is treated as missing, so FinFetcher installs its own copy instead of failing every download.
 
 ## 1.3.0-beta.1 - 2026-09-26
 
