@@ -223,12 +223,21 @@ end;
 
 function IsTemporaryCookieDirectory(Name: String): Boolean;
 var
-  I: Integer;
+  I, Suffix: Integer;
 begin
   Result := False;
-  if (Length(Name) <> 14) or (Copy(Name, 1, 8) <> 'cookies-') then
+  if (Length(Name) < 14) or (Copy(Name, 1, 8) <> 'cookies-') then
     Exit;
-  for I := 9 to 14 do
+  Suffix := Length(Name) - 5;
+  // Exports are cookies-XXXXXX, or cookies-<process id>-XXXXXX since 1.3.0-beta.2.
+  if Suffix > 9 then begin
+    if Name[Suffix - 1] <> '-' then
+      Exit;
+    for I := 9 to Suffix - 2 do
+      if (Name[I] < '0') or (Name[I] > '9') then
+        Exit;
+  end;
+  for I := Suffix to Length(Name) do
     if not (((Name[I] >= 'a') and (Name[I] <= 'z'))
       or ((Name[I] >= 'A') and (Name[I] <= 'Z'))
       or ((Name[I] >= '0') and (Name[I] <= '9'))) then
@@ -236,19 +245,10 @@ begin
   Result := True;
 end;
 
-procedure RemoveManagedData(DataDir: String);
+procedure RemoveCookieExports(DataDir: String);
 var
   Found: TFindRec;
 begin
-  DeleteFile(DataDir + '\config.json');
-  DelTree(DataDir + '\ffmpeg', True, True, True);
-  DelTree(DataDir + '\ytdlp', True, True, True);
-  DelTree(DataDir + '\ytdlp-bin', True, True, True);
-  DelTree(DataDir + '\deno', True, True, True);
-  DelTree(DataDir + '\tools', True, True, True);
-  DelTree(DataDir + '\cache', True, True, True);
-  DelTree(DataDir + '\webview2', True, True, True);
-  DelTree(DataDir + '\updates', True, True, True);
   if FindFirst(DataDir + '\cookies-*', Found) then begin
     try
       repeat
@@ -259,6 +259,19 @@ begin
       FindClose(Found);
     end;
   end;
+end;
+
+procedure RemoveManagedData(DataDir: String);
+begin
+  DeleteFile(DataDir + '\config.json');
+  DelTree(DataDir + '\ffmpeg', True, True, True);
+  DelTree(DataDir + '\ytdlp', True, True, True);
+  DelTree(DataDir + '\ytdlp-bin', True, True, True);
+  DelTree(DataDir + '\deno', True, True, True);
+  DelTree(DataDir + '\tools', True, True, True);
+  DelTree(DataDir + '\cache', True, True, True);
+  DelTree(DataDir + '\webview2', True, True, True);
+  DelTree(DataDir + '\updates', True, True, True);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -280,6 +293,8 @@ begin
 #endif
   end else if CurUninstallStep = usPostUninstall then begin
     DataDir := ExpandConstant('{#AppDataDir}');
+    // Browser cookie copies are never kept, even when the user keeps settings.
+    RemoveCookieExports(DataDir);
     if RemoveUserData then
       RemoveManagedData(DataDir);
     RemoveDir(DataDir);
