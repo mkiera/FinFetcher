@@ -376,7 +376,8 @@ function Open-FfSettings {
     # The gear button's text is the gear emoji, and its title attribute says Settings.
     $gear = Find-FfElement -ControlType Button -NameLike '^(⚙️?|Settings)$'
     $gear | Invoke-FfElement
-    Find-FfElement -Id 'settingsSectionUpdates' -TimeoutSeconds 10 | Out-Null
+    # The section divs expose no AutomationId, so wait for a button inside the Updates section.
+    Find-FfElement -Id 'checkUpdatesBtn' -TimeoutSeconds 10 | Out-Null
 }
 
 function Get-FfParent {
@@ -413,7 +414,10 @@ public static class FfShell {
 
 function Get-FfStderr {
     $path = Join-Path (Get-FfOutDir) 'app-stderr.txt'
-    if (Test-Path $path) { return [IO.File]::ReadAllText($path) }
+    if (-not (Test-Path $path)) { return '' }
+    # The running app still has the file open for writing.
+    $stream = [IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    try { return (New-Object IO.StreamReader($stream)).ReadToEnd() } finally { $stream.Dispose() }
     return ''
 }
 

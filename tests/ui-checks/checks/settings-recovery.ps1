@@ -32,10 +32,10 @@ try {
     # The notice goes to the download log and to Last Error. The log stays hidden until a download
     # starts, so read it from the debug panel (Ctrl+Shift+D).
     Send-FfKeys '^+d' -Focus (Find-FfElement -Id 'urlInput')
-    $lastError = Find-FfElement -Id 'debugLastError'
+    # debugLastError exposes no AutomationId, so look for the notice text in the window.
     $notice = Wait-Ff -TimeoutSeconds 15 -Message 'the debug panel to show the settings notice' {
-        $t = Get-FfText $lastError
-        if ($t -match 'config\.json\.corrupt-') { $t }
+        $e = Find-FfElement -NameLike 'config\.json\.corrupt-' -TimeoutSeconds 0 -Optional
+        if ($e) { Get-FfText $e }
     }
     Write-Host "Last Error: $notice"
     Assert-Ff ($notice -match [regex]::Escape($backups[0].Name)) 'Last Error names the backup file'
@@ -43,7 +43,7 @@ try {
     Save-FfScreenshot -Name 'debug-panel-notice' | Out-Null
     Send-FfKeys '{ESC}'
     Wait-Ff -TimeoutSeconds 5 -Message 'the debug panel to close' {
-        -not (Find-FfElement -Id 'debugLastError' -TimeoutSeconds 0 -Optional)
+        -not (Find-FfElement -NameLike 'config\.json\.corrupt-' -TimeoutSeconds 0 -Optional)
     } | Out-Null
 
     # Saving works again: turn on Log to file in Settings > Downloads.

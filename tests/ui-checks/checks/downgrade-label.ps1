@@ -11,12 +11,13 @@ try {
     Assert-Ff ($null -ne (Find-FfElement -Id 'urlInput' -TimeoutSeconds 5 -Optional)) 'the main view shows, not the FFmpeg setup screen'
     Open-FfSettings
 
-    $list = Find-FfElement -Id 'releasesList'
+    # releasesList exposes no AutomationId, so search the window. Row names are bare versions.
+    $list = Get-FfWindow
     $state = Wait-Ff -TimeoutSeconds 60 -Message 'the Stable release list to load' {
         $message = Find-FfElement -Scope $list -NameLike '^(Error:|Failed to load|No releases found)' -TimeoutSeconds 0 -Optional
         if ($message) { return @{ Message = $message.Current.Name } }
         $rows = @($list.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition) |
-            Where-Object { $_.Current.Name -match '^v\d+\.\d+\.\d+' })
+            Where-Object { $_.Current.Name -match '^v\d+\.\d+\.\d+$' })
         if ($rows.Count) { return @{ Rows = $rows } }
     }
     Get-FfTree -Name 'releases' | Out-Null
