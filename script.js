@@ -484,6 +484,8 @@ async function initiateDownload(passToFlipperClipper = false) {
     document.getElementById('flipperClipperBtn').disabled = true;
     document.getElementById('downloadBtn').textContent = "Starting...";
 
+    // A lookup still pending from the link box would reset the log of the download that starts here
+    infoRequestSequence++;
     // Use cached info only if it was fetched for this exact URL
     currentUrl = url;
     let data = cachedVideoInfo;

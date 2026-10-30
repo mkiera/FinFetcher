@@ -342,6 +342,38 @@ test('a stale info failure does not report an error over the newer URL', async (
     assert.equal(app.run('cachedInfoUrl'), 'https://example.test/b');
 });
 
+test('an info reply for a cached URL that arrives after Download starts keeps the download log', async () => {
+    const pending = new Map();
+    let streamId;
+    const app = await frontend(async (command, payload) => {
+        if (command === 'desktop_stream') streamId = payload.streamId;
+        if (payload.route === '/api/info') return new Promise(resolve => pending.set(payload.payload.url, resolve));
+    });
+    const input = app.elements.get('urlInput');
+    input.value = 'https://example.test/b';
+    const cached = input.fire('blur');
+    pending.get('https://example.test/b')({title: 'Video B', duration: 20, is_playlist: false});
+    await cached;
+    input.value = 'https://example.test/a';
+    const other = input.fire('blur');
+    input.value = 'https://example.test/b';
+    const late = input.fire('blur');
+    const download = app.context.initiateDownload();
+    await tick();
+    app.emit({id: streamId, data: {log: '[download] 42.0% of 10.00MiB'}});
+    await tick();
+    assert.match(app.logs(), /42\.0%/);
+    pending.get('https://example.test/a')({title: 'Video A', duration: 10, is_playlist: false});
+    pending.get('https://example.test/b')({title: 'Video B', duration: 20, is_playlist: false});
+    await other;
+    await late;
+    assert.match(app.logs(), /42\.0%/);
+    assert.doesNotMatch(app.logs(), /Ready to download/);
+    app.emit({id: streamId, data: {status: 'completed'}});
+    app.emit({id: streamId, done: true});
+    await download;
+});
+
 test('entering a new URL during a download keeps its log, preview and status', async () => {
     let streamId;
     const app = await frontend(async (command, payload) => {

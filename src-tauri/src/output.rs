@@ -9,6 +9,7 @@ use std::{
 
 const STAGING_PREFIX: &str = ".finfetcher-stage-";
 const KEPT_MARKER: &str = ".finfetcher-kept";
+const KEPT_PREFIX: &str = ".finfetcher-kept-";
 
 #[derive(Clone, Debug, PartialEq)]
 struct Stamp {
@@ -137,15 +138,29 @@ impl DownloadOutput {
     }
 
     pub fn preserve(&mut self, message: &str) -> String {
+        let Some(directory) = self.directory.take() else {
+            self.lock.take();
+            return message.into();
+        };
+        let mut directory = directory.keep();
+        // The marker goes in while the lock still keeps remove_leftovers in other windows away.
+        let marked = fs::write(directory.join(KEPT_MARKER), b"").is_ok()
+            && directory.join(KEPT_MARKER).is_file();
         self.lock.take();
-        match self.directory.take() {
-            Some(directory) => {
-                let directory = directory.keep();
-                let _ = fs::write(directory.join(KEPT_MARKER), b"");
-                format!("{message} The new download is in {}", directory.display())
+        if !marked {
+            let name = directory
+                .file_name()
+                .map(|name| {
+                    name.to_string_lossy()
+                        .replacen(STAGING_PREFIX, KEPT_PREFIX, 1)
+                })
+                .unwrap_or_default();
+            let renamed = directory.with_file_name(name);
+            if fs::rename(&directory, &renamed).is_ok() {
+                directory = renamed;
             }
-            None => message.into(),
         }
+        format!("{message} The new download is in {}", directory.display())
     }
 
     pub fn publish(&mut self, cancel: &AtomicBool) -> Result<HashMap<PathBuf, PathBuf>, String> {
@@ -374,12 +389,12 @@ fn move_file(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn hold(folder: &Path) -> io::Result<fs::File> {
+pub(crate) fn hold(folder: &Path) -> io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE,
     };
-    // Leaving out FILE_SHARE_DELETE is what marks the folder as in use for remove_leftovers.
+    // Leaving out FILE_SHARE_DELETE is what marks the folder as in use for unused().
     fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
@@ -388,12 +403,12 @@ fn hold(folder: &Path) -> io::Result<fs::File> {
 }
 
 #[cfg(not(windows))]
-fn hold(folder: &Path) -> io::Result<fs::File> {
+pub(crate) fn hold(folder: &Path) -> io::Result<fs::File> {
     fs::File::open(folder)
 }
 
 #[cfg(windows)]
-fn unused(folder: &Path) -> bool {
+pub(crate) fn unused(folder: &Path) -> bool {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         DELETE, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -407,7 +422,7 @@ fn unused(folder: &Path) -> bool {
 }
 
 #[cfg(not(windows))]
-fn unused(_: &Path) -> bool {
+pub(crate) fn unused(_: &Path) -> bool {
     false
 }
 
@@ -422,7 +437,7 @@ fn remove_leftovers(destination: &Path) {
             .to_string_lossy()
             .starts_with(STAGING_PREFIX)
             && entry.file_type().is_ok_and(|kind| kind.is_dir())
-            && !path.join(KEPT_MARKER).exists()
+            && !path.join(KEPT_MARKER).is_file()
             && unused(&path)
         {
             let _ = fs::remove_dir_all(&path);
@@ -685,6 +700,22 @@ mod tests {
         ))
         .is_err());
         assert!(!saved.exists());
+    }
+
+    #[test]
+    fn a_kept_download_survives_cleanup_when_its_marker_cannot_be_written() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut kept = DownloadOutput::new(directory.path()).unwrap();
+        fs::write(kept.path().join("clip.mp4"), b"kept").unwrap();
+        fs::create_dir(kept.path().join(KEPT_MARKER)).unwrap();
+        let kept = PathBuf::from(
+            kept.preserve("Saving failed.")
+                .rsplit_once("The new download is in ")
+                .unwrap()
+                .1,
+        );
+        let _next = DownloadOutput::new(directory.path()).unwrap();
+        assert_eq!(fs::read(kept.join("clip.mp4")).unwrap(), b"kept");
     }
 
     #[test]

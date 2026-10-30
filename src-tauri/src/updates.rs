@@ -238,6 +238,7 @@ pub struct Updater {
     cache: Mutex<HashMap<String, (Instant, String, Value)>>,
     artifacts_refresh: AtomicBool,
     download_lock: Mutex<()>,
+    held_download: Mutex<Option<File>>,
 }
 
 impl Updater {
@@ -253,6 +254,7 @@ impl Updater {
             cache: Mutex::new(HashMap::new()),
             artifacts_refresh: AtomicBool::new(true),
             download_lock: Mutex::new(()),
+            held_download: Mutex::new(None),
         }
     }
 
@@ -452,6 +454,7 @@ impl Updater {
             .prefix("update-")
             .tempdir_in(&folder)
             .map_err(|e| e.to_string())?;
+        let held = crate::output::hold(attempt.path()).map_err(|e| e.to_string())?;
         let downloaded = attempt.path().join("download.part");
         sink(json!({"percent":0,"status":"Starting download..."}));
         let mut response = request(&client()?, url)?;
@@ -499,6 +502,8 @@ impl Updater {
         validate_binary(&path)?;
         let _ = fs::remove_file(&downloaded);
         let destination = attempt.keep().join(final_name);
+        // Held until the installer runs, so prune_downloads in another window leaves it alone.
+        *self.held_download.lock().unwrap_or_else(|e| e.into_inner()) = Some(held);
         sink(
             json!({"percent":100,"status":"Download complete!","success":true,"path":destination}),
         );
@@ -514,6 +519,7 @@ impl Updater {
             .filter(|entry| {
                 entry.file_name().to_string_lossy().starts_with("update-")
                     && entry.file_type().is_ok_and(|kind| kind.is_dir())
+                    && crate::output::unused(&entry.path())
             })
             .map(|entry| {
                 let modified = entry
@@ -993,6 +999,22 @@ mod tests {
         assert!(flags("stable", "not a version")
             .iter()
             .all(|(_, down)| !down));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_leaves_an_update_download_another_window_is_using() {
+        let root = tempfile::tempdir().unwrap();
+        let updates = root.path().join("updates");
+        let active = updates.join("update-active");
+        fs::create_dir_all(&active).unwrap();
+        fs::write(active.join("download.part"), b"partial").unwrap();
+        let _held = crate::output::hold(&active).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        fs::create_dir_all(updates.join("update-newer")).unwrap();
+        let settings = Arc::new(Settings::new(root.path().to_owned()).unwrap());
+        Updater::new(root.path().to_owned(), settings, "1.2.10".into()).prune_downloads();
+        assert!(active.join("download.part").is_file());
     }
 
     #[test]
