@@ -18,6 +18,7 @@ let destinationRequest = null;
 let downloadInFlight = false;
 let downloadStarting = false;
 let streamRequestSequence = 0;
+let infoRequestSequence = 0;
 const desktop = window.desktop;
 
 // Initialize - check for ffmpeg first
@@ -103,6 +104,8 @@ async function showMainApp() {
     selectMode(currentMode);
     loadVersion();
     checkFlipperClipper();
+    // The download request reads its log-to-file flag from the Settings panel
+    loadDownloadSettings();
 
     // Only check for updates if the user hasn't turned that off
     const settings = await loadUpdateSettings();
@@ -212,13 +215,11 @@ async function loadVersion() {
 // Fetch video info when URL input loses focus
 document.getElementById('urlInput').addEventListener('blur', async (e) => {
     const url = e.target.value.trim();
+    // A fetch resets the log and preview, which belong to the running download
+    if (downloadInFlight || downloadStarting) return;
     if (url && url !== currentUrl) {
         currentUrl = url;
-        const info = await fetchVideoInfo(url);
-        // Only mark the cache valid for the URL that actually produced it —
-        // clicking Download blurs the input, so this fetch is still in flight
-        cachedVideoInfo = info;
-        cachedInfoUrl = info ? url : null;
+        await fetchVideoInfo(url);
     }
 });
 
@@ -300,16 +301,23 @@ function toggleTrimInputs() {
     inputs.classList.toggle('hidden', !isChecked);
 }
 
+// Progress arrives five times a second, so an uncapped log slows the WebView over long downloads
+const LOG_LIMIT = 1000;
+
 function log(message) {
     const container = document.getElementById('logContainer');
     const entry = document.createElement('div');
     entry.className = 'log-entry';
     entry.textContent = `> ${message}`;
     container.appendChild(entry);
+    while (container.children.length > LOG_LIMIT) {
+        container.removeChild(container.firstElementChild);
+    }
     container.scrollTop = container.scrollHeight;
 }
 
 async function fetchVideoInfo(url, preserveState = false) {
+    const requestSequence = ++infoRequestSequence;
     try {
         document.getElementById('urlStatus').textContent = "🦭 Your seal is fetching...";
         document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Your seal is diving for metadata...</div>";
@@ -321,6 +329,7 @@ async function fetchVideoInfo(url, preserveState = false) {
             body: JSON.stringify({ url: url })
         });
         const data = await response.json();
+        if (requestSequence !== infoRequestSequence) return null;
 
         if (data.error) throw new Error(data.error);
 
@@ -357,8 +366,14 @@ async function fetchVideoInfo(url, preserveState = false) {
 
         document.getElementById('urlStatus').textContent = "✅ Ready to download";
         document.querySelector('#logContainer').innerHTML = "<div class='log-entry'>> Ready to download! ✅</div>";
+        // Only mark the cache valid for the URL that actually produced it
+        cachedVideoInfo = data;
+        cachedInfoUrl = url;
         return data;
     } catch (e) {
+        if (requestSequence !== infoRequestSequence) return null;
+        cachedVideoInfo = null;
+        cachedInfoUrl = null;
         console.error(e);
         recordError(e.message);
         document.getElementById('urlStatus').textContent = "❌ Your seal couldn't find that";
@@ -469,13 +484,13 @@ async function initiateDownload(passToFlipperClipper = false) {
     document.getElementById('flipperClipperBtn').disabled = true;
     document.getElementById('downloadBtn').textContent = "Starting...";
 
+    // A lookup still pending from the link box would reset the log of the download that starts here
+    infoRequestSequence++;
     // Use cached info only if it was fetched for this exact URL
     currentUrl = url;
     let data = cachedVideoInfo;
     if (url !== cachedInfoUrl || !cachedVideoInfo) {
         data = await fetchVideoInfo(url, true);
-        cachedVideoInfo = data;
-        cachedInfoUrl = data ? url : null;
     }
 
     if (data) {
@@ -1261,8 +1276,9 @@ async function fetchReleases(channel) {
                 row.style.cursor = 'pointer';
                 row.addEventListener('click', () => selectRelease(release, row));
 
-                // Default-select the first (most recent) non-current release
-                if (!firstSelectable) {
+                // Default-select the first (most recent) non-current release,
+                // but never one older than the running version
+                if (!firstSelectable && !release.is_downgrade) {
                     firstSelectable = { release, row };
                 }
             }
@@ -1293,6 +1309,8 @@ function selectRelease(release, rowEl) {
     // Show branch name for artifacts, version for releases
     if (release.branch) {
         btn.textContent = `Update to ${release.branch}@${release.sha}`;
+    } else if (release.is_downgrade) {
+        btn.textContent = `Downgrade to v${release.version}`;
     } else {
         btn.textContent = `Update to v${release.version}`;
     }
@@ -1306,6 +1324,11 @@ async function installSelectedVersion() {
 
     if (!canSelfUpdate) {
         alert('Install a packaged FinFetcher release to use automatic updates.');
+        return;
+    }
+
+    if (selectedRelease.is_downgrade && !confirm(
+        `v${selectedRelease.version} is older than the version you are running. Install it anyway?`)) {
         return;
     }
 
@@ -1327,6 +1350,8 @@ const UPDATE_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
 function restartUpdateCheckTimer() {
     if (updateCheckTimer) clearInterval(updateCheckTimer);
+    updateCheckTimer = null;
+    if (!document.getElementById('autoUpdateToggle').checked) return;
     updateCheckTimer = setInterval(async () => {
         await checkForUpdates({ bypassCooldown: true });
         refreshVisibleReleaseList();
@@ -1347,12 +1372,14 @@ function refreshVisibleReleaseList() {
 // bypassCooldown: skip the server's once-an-hour gate (the cache still
 // enforces its own short floor against hammering GitHub).
 // surfaceSkipped: show the banner even for a version the user chose to skip —
-// true only for explicit user actions, never for automatic checks.
+// true only for explicit user actions, never for automatic checks. Only these
+// checks run while automatic checks are turned off.
 async function checkForUpdates({ bypassCooldown = false, surfaceSkipped = false } = {}) {
     const force = surfaceSkipped;
     try {
         const params = new URLSearchParams();
         if (bypassCooldown || surfaceSkipped) params.set('force', 'true');
+        if (surfaceSkipped) params.set('manual', 'true');
 
         const response = await desktop.request(`/api/update/check?${params}`);
         const data = await response.json();
@@ -1559,6 +1586,8 @@ async function startUpdate() {
     }
 }
 
+let settingsNoticeShown = false;
+
 async function loadUpdateSettings() {
     try {
         const response = await desktop.request('/api/update/settings');
@@ -1582,6 +1611,12 @@ async function loadUpdateSettings() {
         // Self-update only works for the packaged exe
         canSelfUpdate = settings.can_self_update !== false;
 
+        if (settings.settings_notice && !settingsNoticeShown) {
+            settingsNoticeShown = true;
+            log(settings.settings_notice);
+            recordError(settings.settings_notice);
+        }
+
         return settings;
     } catch (e) {
         console.warn('Could not load update settings:', e);
@@ -1591,6 +1626,7 @@ async function loadUpdateSettings() {
 
 async function saveUpdateSettings() {
     const autoCheck = document.getElementById('autoUpdateToggle').checked;
+    if (autoCheck !== Boolean(updateCheckTimer)) restartUpdateCheckTimer();
 
     try {
         await desktop.request('/api/update/settings', {
@@ -1603,6 +1639,7 @@ async function saveUpdateSettings() {
         });
     } catch (e) {
         console.warn('Could not save update settings:', e);
+        recordError(`Could not save update settings: ${e.message}`);
     }
 }
 

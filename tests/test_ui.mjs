@@ -216,10 +216,14 @@ test('stream playback errors release the button and closing before extraction fi
 });
 
 test('settings cannot overwrite stored preferences before they load', async () => {
-    const app = await frontend();
+    let finishLoad;
+    const app = await frontend(async (_, payload) => {
+        if (payload.route === '/api/settings' && payload.method !== 'POST') return new Promise(resolve => {finishLoad = resolve;});
+    });
     await app.context.saveDownloadSettings();
-    assert.equal(app.calls.some(call => call.payload.route === '/api/settings'), false);
-    await app.context.loadDownloadSettings();
+    assert.equal(app.calls.some(call => call.payload.route === '/api/settings' && call.payload.method === 'POST'), false);
+    finishLoad({});
+    await tick();
     app.elements.get('containerSelect').value = 'mkv';
     app.elements.get('audioFormatSelect').value = 'flac';
     app.elements.get('subtitleLangs').value = 'en,es';
@@ -269,4 +273,131 @@ test('debug information reports the Rust executable and release links open exter
     await link.listeners.get('click')({currentTarget: link, preventDefault: () => {prevented = true;}});
     assert.equal(prevented, true);
     assert.equal(app.calls.at(-1).command, 'desktop_open_external');
+});
+
+test('a saved log-to-file preference reaches the download without opening Settings', async () => {
+    const app = await frontend(async (command, payload, emit) => {
+        if (payload.route === '/api/settings' && payload.method !== 'POST') return {log_to_file: true};
+        if (command === 'desktop_stream') {
+            emit({id: payload.streamId, data: {status: 'completed'}});
+            emit({id: payload.streamId, done: true});
+        }
+    });
+    await tick();
+    assert.equal(app.elements.get('settingsModal').classList.contains('hidden'), true);
+    await app.context.startDownload('single');
+    assert.equal(app.calls.find(call => call.command === 'desktop_stream').payload.payload.log_to_file, true);
+});
+
+test('the log keeps only its most recent entries during long downloads', async () => {
+    const app = await frontend();
+    for (let i = 1; i <= 5000; i++) app.context.log(`[download] line ${i}`);
+    const entries = app.elements.get('logContainer').children;
+    assert.equal(entries.length, 1000);
+    assert.equal(entries[0].textContent, '> [download] line 4001');
+    assert.equal(entries.at(-1).textContent, '> [download] line 5000');
+    app.context.log('Download Complete! ✅');
+    assert.equal(entries.length, 1000);
+    assert.equal(app.elements.get('logContainer').children.at(-1).textContent, '> Download Complete! ✅');
+});
+
+test('a slower info reply for an older URL does not replace the newer one', async () => {
+    const pending = new Map();
+    const app = await frontend(async (_, payload) => {
+        if (payload.route === '/api/info') return new Promise(resolve => pending.set(payload.payload.url, resolve));
+    });
+    const input = app.elements.get('urlInput');
+    input.value = 'https://example.test/a';
+    const first = input.fire('blur');
+    input.value = 'https://example.test/b';
+    const second = input.fire('blur');
+    pending.get('https://example.test/b')({title: 'Video B', duration: 20, formats: [{height: 720}], is_playlist: false});
+    await second;
+    pending.get('https://example.test/a')({title: 'Video A', duration: 10, formats: [{height: 2160}], is_playlist: false});
+    await first;
+    assert.equal(app.elements.get('previewTitle').textContent, 'Video B');
+    assert.deepEqual(app.elements.get('qualitySelect').options.map(option => option.value), ['max', '720p']);
+    assert.equal(app.run('videoDuration'), 20);
+    assert.equal(app.run('cachedInfoUrl'), 'https://example.test/b');
+    assert.equal(app.run('cachedVideoInfo.title'), 'Video B');
+    assert.equal(app.elements.get('previewPanel').classList.contains('hidden'), false);
+});
+
+test('a stale info failure does not report an error over the newer URL', async () => {
+    const pending = new Map();
+    const app = await frontend(async (_, payload) => {
+        if (payload.route === '/api/info') return new Promise((resolve, reject) => pending.set(payload.payload.url, {resolve, reject}));
+    });
+    const input = app.elements.get('urlInput');
+    input.value = 'https://example.test/a';
+    const first = input.fire('blur');
+    input.value = 'https://example.test/b';
+    const second = input.fire('blur');
+    pending.get('https://example.test/b').resolve({title: 'Video B', duration: 20, is_playlist: false});
+    await second;
+    pending.get('https://example.test/a').reject(new Error('Video unavailable'));
+    await first;
+    assert.equal(app.elements.get('urlStatus').textContent, '✅ Ready to download');
+    assert.doesNotMatch(app.logs(), /couldn't find/);
+    assert.equal(app.run('cachedInfoUrl'), 'https://example.test/b');
+});
+
+test('an info reply for a cached URL that arrives after Download starts keeps the download log', async () => {
+    const pending = new Map();
+    let streamId;
+    const app = await frontend(async (command, payload) => {
+        if (command === 'desktop_stream') streamId = payload.streamId;
+        if (payload.route === '/api/info') return new Promise(resolve => pending.set(payload.payload.url, resolve));
+    });
+    const input = app.elements.get('urlInput');
+    input.value = 'https://example.test/b';
+    const cached = input.fire('blur');
+    pending.get('https://example.test/b')({title: 'Video B', duration: 20, is_playlist: false});
+    await cached;
+    input.value = 'https://example.test/a';
+    const other = input.fire('blur');
+    input.value = 'https://example.test/b';
+    const late = input.fire('blur');
+    const download = app.context.initiateDownload();
+    await tick();
+    app.emit({id: streamId, data: {log: '[download] 42.0% of 10.00MiB'}});
+    await tick();
+    assert.match(app.logs(), /42\.0%/);
+    pending.get('https://example.test/a')({title: 'Video A', duration: 10, is_playlist: false});
+    pending.get('https://example.test/b')({title: 'Video B', duration: 20, is_playlist: false});
+    await other;
+    await late;
+    assert.match(app.logs(), /42\.0%/);
+    assert.doesNotMatch(app.logs(), /Ready to download/);
+    app.emit({id: streamId, data: {status: 'completed'}});
+    app.emit({id: streamId, done: true});
+    await download;
+});
+
+test('entering a new URL during a download keeps its log, preview and status', async () => {
+    let streamId;
+    const app = await frontend(async (command, payload) => {
+        if (command === 'desktop_stream') streamId = payload.streamId;
+        if (payload.route === '/api/info') return {title: 'Other video', duration: 5, is_playlist: false};
+    });
+    app.run("currentUrl = 'https://example.test/running'");
+    app.elements.get('previewPanel').classList.remove('hidden');
+    app.elements.get('urlStatus').textContent = '✅ Ready to download';
+    const download = app.context.startDownload('single');
+    await tick();
+    app.emit({id: streamId, data: {log: '[download] 42.0% of 10.00MiB'}});
+    const input = app.elements.get('urlInput');
+    input.value = 'https://example.test/next';
+    await input.fire('blur');
+    assert.match(app.logs(), /42\.0%/);
+    assert.doesNotMatch(app.logs(), /diving for metadata|Ready to download/);
+    assert.equal(app.elements.get('previewPanel').classList.contains('hidden'), false);
+    assert.equal(app.elements.get('urlStatus').textContent, '✅ Ready to download');
+    app.emit({id: streamId, data: {status: 'completed'}});
+    app.emit({id: streamId, done: true});
+    await download;
+    assert.equal(app.calls.filter(call => call.payload.route === '/api/info').length, 0);
+    await input.fire('blur');
+    assert.equal(app.calls.filter(call => call.payload.route === '/api/info').length, 1);
+    assert.equal(app.run('cachedInfoUrl'), 'https://example.test/next');
 });

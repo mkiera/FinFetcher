@@ -15,6 +15,9 @@ const FFMPEG_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-esse
 const MAX_DOWNLOAD: u64 = 768 * 1024 * 1024;
 const MAX_BINARY: u64 = 512 * 1024 * 1024;
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 3600);
+const RUNTIME_RETRY: Duration = Duration::from_secs(5 * 60);
+// --js-runtimes first shipped in yt-dlp 2025.11.12.
+const MIN_YTDLP: &str = "2025.11.12";
 
 #[derive(Clone)]
 struct CachedBinary {
@@ -28,7 +31,7 @@ pub struct Tools {
     settings: Arc<Settings>,
     versions: Mutex<HashMap<PathBuf, CachedBinary>>,
     install: Mutex<()>,
-    runtime_attempt: Mutex<Option<Result<(), String>>>,
+    runtime_attempt: Mutex<Option<(Instant, Result<(), String>)>>,
     ytdlp_check: Mutex<Option<Instant>>,
     last_result: Mutex<Value>,
     discovery_override: Option<Vec<PathBuf>>,
@@ -389,13 +392,15 @@ impl Tools {
         check_cancel(cancel)?;
         rename_when_free_cancellable(stage.path(), &destination, cancel)?;
         let previous = read_json(&managed.join("active.json"));
+        let previous = previous
+            .get("directory")
+            .and_then(Value::as_str)
+            .filter(|s| safe_component(s));
         atomic_json(
             &managed.join("active.json"),
-            &json!({
-                "version":version, "directory":directory,
-                "previous":previous.get("directory").and_then(Value::as_str).filter(|s| safe_component(s)),
-            }),
+            &json!({"version":version, "directory":directory, "previous":previous}),
         )?;
+        prune_ytdlp(&managed, &[Some(directory.as_str()), previous]);
         progress(sink, "yt-dlp", 100, "yt-dlp is ready.");
         Ok(json!({"checked":true,"updated":true,"running":running,"installed":version}))
     }
@@ -421,13 +426,15 @@ impl Tools {
             return Ok(());
         }
         let mut attempt = cancellable_lock(&self.runtime_attempt, cancel)?;
-        if let Some(result) = &*attempt {
-            return result.clone();
+        if let Some((at, result)) = &*attempt {
+            if result.is_ok() || at.elapsed() < RUNTIME_RETRY {
+                return result.clone();
+            }
         }
         let _install = cancellable_lock(&self.install, cancel)?;
         let result = install();
         if !result.as_ref().is_err_and(|error| error == "Cancelled") {
-            *attempt = Some(result.clone());
+            *attempt = Some((Instant::now(), result.clone()));
         }
         result
     }
@@ -1085,7 +1092,7 @@ fn newest_ytdlp(
 ) -> Result<Option<PathBuf>, String> {
     let mut newest: Option<(PathBuf, String)> = None;
     for path in paths {
-        let Some(version) = validate(&path)? else {
+        let Some(version) = validate(&path)?.filter(|version| !is_newer(MIN_YTDLP, version)) else {
             continue;
         };
         if newest
@@ -1096,6 +1103,24 @@ fn newest_ytdlp(
         }
     }
     Ok(newest.map(|(path, _)| path))
+}
+
+fn prune_ytdlp(managed: &Path, keep: &[Option<&str>]) {
+    let Ok(entries) = fs::read_dir(managed) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.')
+            || keep.contains(&Some(name.as_ref()))
+            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            continue;
+        }
+        // Windows refuses to delete a running yt-dlp.exe, so a folder still in use stays.
+        let _ = fs::remove_dir_all(entry.path());
+    }
 }
 
 fn safe_component(value: &str) -> bool {
@@ -1240,6 +1265,33 @@ mod tests {
             .unwrap(),
             Some(PathBuf::from("previous"))
         );
+    }
+
+    #[test]
+    fn ytdlp_older_than_the_minimum_counts_as_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = tools(dir.path());
+        let path = dir.path().join("bin").join(executable_name("yt-dlp"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"not run").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        for (version, usable) in [
+            ("2024.04.09", false),
+            ("2025.10.22", false),
+            ("2025.11.11.235959", false),
+            ("2025.11.12", true),
+            ("2026.10.26", true),
+        ] {
+            manager.versions.lock().unwrap().insert(
+                path.clone(),
+                CachedBinary {
+                    length: metadata.len(),
+                    modified: metadata.modified().ok(),
+                    version: version.to_owned(),
+                },
+            );
+            assert_eq!(manager.ytdlp().is_some(), usable, "{version}");
+        }
     }
 
     #[test]
@@ -1523,6 +1575,40 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_runtime_install_is_retried_after_a_short_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = tools(dir.path());
+        let attempts = std::cell::Cell::new(0);
+        let failing = || {
+            attempts.set(attempts.get() + 1);
+            Err("offline".to_owned())
+        };
+        let cancel = AtomicBool::new(false);
+        assert_eq!(
+            manager.ensure_runtime_with(&cancel, failing).unwrap_err(),
+            "offline"
+        );
+        assert_eq!(
+            manager.ensure_runtime_with(&cancel, failing).unwrap_err(),
+            "offline"
+        );
+        assert_eq!(attempts.get(), 1);
+        let expired = Instant::now()
+            .checked_sub(RUNTIME_RETRY + Duration::from_secs(1))
+            .unwrap();
+        manager.runtime_attempt.lock().unwrap().as_mut().unwrap().0 = expired;
+        let succeeding = || {
+            attempts.set(attempts.get() + 1);
+            Ok(())
+        };
+        assert!(manager.ensure_runtime_with(&cancel, succeeding).is_ok());
+        assert_eq!(attempts.get(), 2);
+        manager.runtime_attempt.lock().unwrap().as_mut().unwrap().0 = expired;
+        assert!(manager.ensure_runtime_with(&cancel, failing).is_ok());
+        assert_eq!(attempts.get(), 2);
+    }
+
+    #[test]
     fn cancelling_a_stalled_bootstrap_removes_partial_files_and_allows_retry() {
         let server = StalledServer::new(true);
         let dir = tempfile::tempdir().unwrap();
@@ -1729,18 +1815,90 @@ mod tests {
     }
 
     #[test]
+    fn ytdlp_pruning_keeps_active_previous_and_staging_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("ytdlp-bin");
+        for name in ["active", "previous", "older", "oldest", ".staging-x"] {
+            fs::create_dir_all(managed.join(name)).unwrap();
+            fs::write(managed.join(name).join("yt-dlp.exe"), b"x").unwrap();
+        }
+        fs::write(managed.join("active.json"), b"{}").unwrap();
+        prune_ytdlp(&managed, &[Some("active"), Some("previous")]);
+        let mut left: Vec<_> = fs::read_dir(&managed)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![".staging-x", "active", "active.json", "previous"]
+        );
+        prune_ytdlp(&managed, &[Some("active"), None]);
+        assert!(managed.join("active").exists());
+        assert!(!managed.join("previous").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ytdlp_pruning_leaves_a_folder_whose_executable_is_running() {
+        use std::os::windows::process::CommandExt;
+        let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("ytdlp-bin");
+        let busy = managed.join("busy");
+        fs::create_dir_all(&busy).unwrap();
+        let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        fs::copy(system.join("ping.exe"), busy.join("yt-dlp.exe")).unwrap();
+        let mut child = std::process::Command::new(busy.join("yt-dlp.exe"))
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .creation_flags(0x08000000)
+            .spawn()
+            .unwrap();
+        prune_ytdlp(&managed, &[Some("active")]);
+        let survived = busy.join("yt-dlp.exe").exists();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(survived);
+    }
+
+    #[test]
     #[ignore = "Downloads official executables into an isolated temporary installation"]
     fn official_ytdlp_installation_is_verified_and_usable() {
         let dir = tempfile::tempdir().unwrap();
+        let managed = dir.path().join("ytdlp-bin");
+        for name in ["2000.01.01-stale", "2000.01.02-old", "2000.01.03-prev"] {
+            fs::create_dir_all(managed.join(name)).unwrap();
+            fs::write(managed.join(name).join(executable_name("yt-dlp")), b"old").unwrap();
+        }
+        fs::write(
+            managed.join("active.json"),
+            br#"{"directory":"2000.01.03-prev","previous":"2000.01.02-old"}"#,
+        )
+        .unwrap();
         let manager = tools(dir.path());
         let result = manager
             .update_ytdlp(true, &crate::events::silent())
             .unwrap();
         let executable = manager.ytdlp().unwrap();
-        assert!(executable.starts_with(dir.path().join("ytdlp-bin")));
+        assert!(executable.starts_with(&managed));
         assert_eq!(result["updated"], true);
         assert!(probe_version(&executable, "yt-dlp").is_ok());
         assert_eq!(result["checked"], true);
+        let active = read_json(&managed.join("active.json"));
+        assert_eq!(active["previous"], "2000.01.03-prev");
+        let mut left: Vec<_> = fs::read_dir(&managed)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            vec![
+                "2000.01.03-prev",
+                active["directory"].as_str().unwrap(),
+                "active.json"
+            ]
+        );
     }
 
     #[test]

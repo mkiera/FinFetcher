@@ -1,0 +1,117 @@
+name: UI Check
+
+# Builds the app on a clean GitHub Windows machine, drives it with the scripts in tests/ui-checks
+# and uploads screenshots, so a change can be checked in the running app without a desktop.
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: Check name wildcard (file name in tests/ui-checks/checks without .ps1)
+        default: '*'
+  push:
+    branches:
+      - '**'
+    paths-ignore:
+      - '**.md'
+
+concurrency:
+  group: ui-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  FFMPEG_URL: https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-essentials_build.zip
+  FFMPEG_SHA256: 04861d3339c5ebe38b56c19a15cf2c0cc97f5de4fa8910e4d47e5e6404e4a2d4
+  YTDLP_URL: https://github.com/yt-dlp/yt-dlp/releases/download/2025.11.12/yt-dlp.exe
+  YTDLP_SHA256: 9f8b03a37125854895a7eebf50a605e34e7ec3bd2444931eff377f3ccec50e96
+
+jobs:
+  ui:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Screen size
+        shell: pwsh
+        run: |
+          # The runner's screen starts at 1024x768, smaller than the app's window.
+          try { Set-DisplayResolution -Width 1920 -Height 1080 -Force -ErrorAction Stop } catch { Write-Host "Set-DisplayResolution failed: $_" }
+          Add-Type -AssemblyName System.Windows.Forms
+          Write-Host "screen: $([System.Windows.Forms.SystemInformation]::VirtualScreen)"
+          Write-Host "session: $([System.Diagnostics.Process]::GetCurrentProcess().SessionId) interactive: $([Environment]::UserInteractive)"
+
+      - name: Download pinned FFmpeg and yt-dlp
+        shell: pwsh
+        run: |
+          $tools = Join-Path $env:RUNNER_TEMP 'ui-tools'
+          New-Item -ItemType Directory -Force -Path $tools | Out-Null
+          function Get-Pinned($url, $sha, $path) {
+            Invoke-WebRequest -Uri $url -OutFile $path
+            $actual = (Get-FileHash -Algorithm SHA256 $path).Hash.ToLowerInvariant()
+            if ($actual -ne $sha) { throw "$url has SHA-256 $actual, expected $sha" }
+          }
+          $zip = Join-Path $tools 'ffmpeg.zip'
+          Get-Pinned $env:FFMPEG_URL $env:FFMPEG_SHA256 $zip
+          Expand-Archive $zip -DestinationPath (Join-Path $tools 'ffmpeg')
+          $bin = (Get-ChildItem (Join-Path $tools 'ffmpeg') -Recurse -Filter ffprobe.exe | Select-Object -First 1).DirectoryName
+          if (-not $bin) { throw 'ffprobe.exe not found in the FFmpeg archive' }
+          $ytdlp = Join-Path $tools 'yt-dlp.exe'
+          Get-Pinned $env:YTDLP_URL $env:YTDLP_SHA256 $ytdlp
+          Add-Content -Path $env:GITHUB_ENV -Value "FF_UI_FFMPEG_DIR=$bin"
+          Add-Content -Path $env:GITHUB_ENV -Value "FF_UI_YTDLP=$ytdlp"
+
+      - name: Install frontend build dependencies
+        run: npm ci
+
+      - name: Prepare alpha version
+        run: node scripts/build-identity.mjs --alpha --run-number ${{ github.run_number }}
+
+      - name: Stage frontend assets
+        run: npm run build:frontend
+
+      - name: Build the app
+        shell: pwsh
+        run: |
+          $identity = Get-Content -LiteralPath 'build_info.json' -Raw | ConvertFrom-Json
+          $env:FINFETCHER_BUILD_VERSION = $identity.version
+          npm run tauri -- build --no-bundle --config src-tauri/build-config.json
+          if ($LASTEXITCODE -ne 0) { throw 'Application build failed.' }
+          if (-not (Test-Path src-tauri/target/release/FinFetcher.exe)) { throw 'src-tauri/target/release/FinFetcher.exe is missing' }
+
+      - name: Run UI checks
+        shell: pwsh
+        env:
+          CHECK_FILTER: ${{ github.event.inputs.filter }}
+        run: |
+          $filter = $env:CHECK_FILTER
+          if (-not $filter) { $filter = '*' }
+          ./tests/ui-checks/Invoke-UiChecks.ps1 -AppPath src-tauri/target/release/FinFetcher.exe -OutDir ui-results -Filter $filter
+
+      - name: Upload screenshots and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-check-results
+          path: ui-results
+          retention-days: 14
+          if-no-files-found: warn

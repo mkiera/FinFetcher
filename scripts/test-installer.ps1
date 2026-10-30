@@ -64,6 +64,9 @@ foreach ($scenario in @('running', 'blocked', 'rollback', 'prerequisite')) {
         if (-not $setup.WaitForExit(55000)) { throw "Installer timed out in $scenario." }
         if ($scenario -eq 'running') {
             if ($setup.ExitCode -ne 0) { throw "Running-app upgrade failed. Log: $install/update.log" }
+            # Setup's RedirectionGuard passes to the app it relaunches, and yt-dlp then fails with WinError 448 on junctions in PATH.
+            $guard = Select-String -LiteralPath (Join-Path $install 'update.log') -Pattern 'RedirectionGuard status' | Select-Object -Last 1
+            if ($guard -and $guard.Line -match 'Enabled') { throw "Setup relaunched the app under RedirectionGuard: $($guard.Line)" }
             if (-not $old.WaitForExit(5000)) { throw 'Old application remained running.' }
             Wait-File (Join-Path $install 'relaunched.txt')
             if ((Get-Content -LiteralPath (Join-Path $install 'relaunched.txt') -Raw) -ne 'new') { throw 'The old application was relaunched.' }

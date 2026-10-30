@@ -41,6 +41,8 @@ AppPublisherURL=https://github.com/mkiera/FinFetcher
 AppSupportURL=https://github.com/mkiera/FinFetcher/issues
 AppUpdatesURL=https://github.com/mkiera/FinFetcher/releases
 PrivilegesRequired=lowest
+; The app relaunched after an update inherits RedirectionGuard, and yt-dlp then fails on junctions in PATH.
+RedirectionGuard=no
 ArchitecturesAllowed=x64compatible
 DefaultDirName={localappdata}\Programs\{#StorageId}
 DefaultGroupName={#AppName}

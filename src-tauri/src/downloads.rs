@@ -80,6 +80,7 @@ pub struct Downloads {
 
 impl Downloads {
     pub fn new(tools: Arc<Tools>, settings: Arc<Settings>) -> Self {
+        remove_stale_cookies(tools.root());
         Self {
             tools,
             settings,
@@ -219,6 +220,11 @@ impl Downloads {
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
+        drop(state);
+        self.cookies
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 
     pub fn run(&self, job: Arc<Job>, sink: EventSink) {
@@ -295,7 +301,7 @@ impl Downloads {
     }
 
     fn cookie_args(&self, executable: &Path, cancel: &AtomicBool) -> Vec<String> {
-        if !self.browser_cookies {
+        if !self.browser_cookies || self.shutdown.load(Ordering::Acquire) {
             return Vec::new();
         }
         let mut cached = loop {
@@ -317,7 +323,7 @@ impl Downloads {
                     break;
                 }
                 let Ok(directory) = tempfile::Builder::new()
-                    .prefix("cookies-")
+                    .prefix(&format!("cookies-{}-", std::process::id()))
                     .tempdir_in(self.tools.root())
                 else {
                     break;
@@ -393,7 +399,12 @@ impl Downloads {
         self.tool_args(&mut args);
         args.extend(self.cookie_args(&executable, &self.shutdown));
         args.extend(["--".into(), url.into()]);
-        let info = extract(&executable, &args, &self.shutdown)?;
+        let limit = if stream {
+            INFO_TIMEOUT
+        } else {
+            LISTING_TIMEOUT
+        };
+        let info = extract(&executable, &args, &self.shutdown, limit)?;
         if stream {
             let url = info["url"]
                 .as_str()
@@ -443,7 +454,7 @@ impl Downloads {
             self.tool_args(&mut args);
             args.extend(cookies.clone());
             args.extend(["--".into(), job.request.url.clone()]);
-            let info = extract(&executable, &args, &job.cancelled)?;
+            let info = extract(&executable, &args, &job.cancelled, LISTING_TIMEOUT)?;
             if let Some(entries) = info["entries"].as_array() {
                 urls = entries
                     .iter()
@@ -463,6 +474,15 @@ impl Downloads {
             .save_path
             .clone()
             .unwrap_or_else(default_downloads);
+        if job.request.pass_to_flipperclipper
+            && job.request.mode == "video"
+            && job.request.kind == "playlist"
+        {
+            sink(
+                json!({"log":"> [FinFetcher] FlipperClipper opens single videos only, so the playlist will not be passed to it."}),
+            );
+        }
+        let mut failed = 0;
         for (index, (url, info)) in urls.iter().enumerate() {
             job.check()?;
             if urls.len() > 1 {
@@ -472,7 +492,7 @@ impl Downloads {
             }
             let mut request = job.request.clone();
             request.url = url.clone();
-            let final_file = self.download_one(
+            let final_file = match self.download_one(
                 &executable,
                 &request,
                 info.as_ref(),
@@ -481,8 +501,22 @@ impl Downloads {
                 &mut destination,
                 job,
                 sink,
-            )?;
-            if request.pass_to_flipperclipper && request.mode == "video" {
+            ) {
+                Ok(file) => file,
+                Err(error)
+                    if urls.len() > 1
+                        && error != "Cancelled"
+                        && !job.cancelled.load(Ordering::Acquire) =>
+                {
+                    failed += 1;
+                    sink(
+                        json!({"log":format!("> [FinFetcher] Video {} of {} failed: {error}",index+1,urls.len())}),
+                    );
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if opens_in_flipperclipper(&request) {
                 if let Some(path) = final_file {
                     let message = match integrations::open_clip(&path) {
                         Ok(()) => "Opened the video in FlipperClipper.".into(),
@@ -491,6 +525,12 @@ impl Downloads {
                     sink(json!({"log":format!("> [FinFetcher] {message}")}));
                 }
             }
+        }
+        if failed > 0 {
+            return Err(format!(
+                "{failed} of {} videos could not be downloaded. The log shows the reason for each.",
+                urls.len()
+            ));
         }
         Ok(())
     }
@@ -542,7 +582,18 @@ impl Downloads {
             } else {
                 metadata_args.extend(["--".into(), request.url.clone()]);
             }
-            let info = extract(executable, &metadata_args, &job.cancelled)?;
+            let info = extract(executable, &metadata_args, &job.cancelled, INFO_TIMEOUT)?;
+            if string(&info, "_type") == "playlist" || info["entries"].is_array() {
+                let title = string(&info, "title");
+                return Err(format!(
+                    "{} is a playlist, not a single video. Download its own link as a playlist.",
+                    if title.is_empty() {
+                        "This entry".to_string()
+                    } else {
+                        format!("\"{title}\"")
+                    }
+                ));
+            }
             if use_archive && archived(&info, &archive_path) {
                 sink(json!({"log":"[download] This video is already in the download archive."}));
                 return Ok(None);
@@ -866,14 +917,17 @@ impl Downloads {
     }
 }
 
-fn extract(executable: &Path, args: &[String], cancel: &AtomicBool) -> Result<Value, String> {
-    let output = process::run(
-        executable,
-        args,
-        cancel,
-        Some(Duration::from_secs(45)),
-        |_, _| {},
-    )?;
+const INFO_TIMEOUT: Duration = Duration::from_secs(45);
+// yt-dlp prints nothing while it pages through a long playlist, so only a total limit applies.
+const LISTING_TIMEOUT: Duration = Duration::from_secs(600);
+
+fn extract(
+    executable: &Path,
+    args: &[String],
+    cancel: &AtomicBool,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let output = process::run(executable, args, cancel, Some(timeout), |_, _| {})?;
     if !output.success {
         return Err(if output.error.is_empty() {
             "Could not inspect the video.".into()
@@ -995,11 +1049,96 @@ fn entry_url(entry: &Value) -> Option<String> {
 }
 
 pub fn default_downloads() -> PathBuf {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Downloads")
+    downloads_folder(
+        known_downloads(),
+        std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")),
+    )
+}
+
+fn downloads_folder(known: Option<PathBuf>, profile: Option<std::ffi::OsString>) -> PathBuf {
+    known
+        .filter(|folder| folder.is_absolute())
+        .unwrap_or_else(|| {
+            profile
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+                .join("Downloads")
+        })
+}
+
+#[cfg(windows)]
+fn known_downloads() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::{
+        System::Com::CoTaskMemFree,
+        UI::Shell::{FOLDERID_Downloads, SHGetKnownFolderPath},
+    };
+    let mut path = std::ptr::null_mut();
+    let result =
+        unsafe { SHGetKnownFolderPath(&FOLDERID_Downloads, 0, std::ptr::null_mut(), &mut path) };
+    let folder = (result >= 0 && !path.is_null()).then(|| unsafe {
+        let length = (0..).take_while(|&i| *path.add(i) != 0).count();
+        PathBuf::from(std::ffi::OsString::from_wide(std::slice::from_raw_parts(
+            path, length,
+        )))
+    });
+    unsafe { CoTaskMemFree(path as _) };
+    folder
+}
+
+#[cfg(not(windows))]
+fn known_downloads() -> Option<PathBuf> {
+    None
+}
+
+fn opens_in_flipperclipper(request: &DownloadRequest) -> bool {
+    request.pass_to_flipperclipper && request.mode == "video" && request.kind != "playlist"
+}
+
+fn remove_stale_cookies(root: &Path) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix("cookies-") else {
+            continue;
+        };
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let owner = rest
+            .split_once('-')
+            .and_then(|(pid, _)| pid.parse::<u32>().ok());
+        // Another FinFetcher window may still be reading its own export.
+        if owner.is_some_and(|pid| pid != std::process::id() && process_running(pid)) {
+            continue;
+        }
+        let _ = fs::remove_dir_all(entry.path());
+    }
+}
+
+#[cfg(windows)]
+fn process_running(pid: u32) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, STILL_ACTIVE},
+        System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut code = 0;
+        let running = GetExitCodeProcess(handle, &mut code) != 0 && code == STILL_ACTIVE as u32;
+        CloseHandle(handle);
+        running
+    }
+}
+
+#[cfg(not(windows))]
+fn process_running(_: u32) -> bool {
+    false
 }
 
 fn is_youtube(url: &str) -> bool {
@@ -1031,11 +1170,19 @@ fn installed_browsers() -> Vec<&'static str> {
     .collect()
 }
 
+fn whole(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|n| n.is_finite() && *n >= 0.0)
+            .map(|n| n as u64)
+    })
+}
+
 fn progress_event(progress: &Value) -> Value {
-    let downloaded = progress["downloaded_bytes"].as_u64().unwrap_or(0);
-    let total = progress["total_bytes"]
-        .as_u64()
-        .or_else(|| progress["total_bytes_estimate"].as_u64());
+    let downloaded = whole(&progress["downloaded_bytes"]).unwrap_or(0);
+    let total =
+        whole(&progress["total_bytes"]).or_else(|| whole(&progress["total_bytes_estimate"]));
     let percent = total
         .filter(|n| *n > 0)
         .map(|total| downloaded as f64 * 100.0 / total as f64);
@@ -1043,8 +1190,7 @@ fn progress_event(progress: &Value) -> Value {
         .as_f64()
         .map(|n| media::format_size(Some(n.max(0.0) as u64)))
         .unwrap_or_else(|| "Unknown".into());
-    let eta = progress["eta"]
-        .as_u64()
+    let eta = whole(&progress["eta"])
         .map(|n| format!("{}:{:02}", n / 60, n % 60))
         .unwrap_or_else(|| "?".into());
     json!({"log":format!("[download] {} of {} at {speed}/s ETA {eta}",percent.map(|n|format!("{n:.1}%")).unwrap_or_else(||"?".into()),media::format_size(total)),"progress":progress,"percent":percent})
@@ -1053,6 +1199,27 @@ fn progress_event(progress: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_folder_prefers_the_windows_downloads_location() {
+        let moved = PathBuf::from(r"D:\Moved\Downloads");
+        let profile = Some(r"C:\Users\Someone".into());
+        assert_eq!(
+            downloads_folder(Some(moved.clone()), profile.clone()),
+            moved
+        );
+        assert_eq!(
+            downloads_folder(None, profile.clone()),
+            Path::new(r"C:\Users\Someone").join("Downloads")
+        );
+        assert_eq!(
+            downloads_folder(Some("Downloads".into()), profile),
+            Path::new(r"C:\Users\Someone").join("Downloads")
+        );
+        #[cfg(windows)]
+        assert_eq!(default_downloads(), known_downloads().unwrap());
+    }
+
     fn engine(root: &Path) -> Downloads {
         let settings = Arc::new(Settings::new(root.to_owned()).unwrap());
         let tools = Arc::new(Tools::new(root.to_owned(), settings.clone()));
@@ -1090,6 +1257,57 @@ mod tests {
     }
 
     #[test]
+    fn close_deletes_the_exported_browser_cookies() {
+        let root = tempfile::tempdir().unwrap();
+        let engine = engine(root.path());
+        let exported = tempfile::Builder::new()
+            .prefix(&format!("cookies-{}-", std::process::id()))
+            .tempdir_in(root.path())
+            .unwrap();
+        let folder = exported.path().to_owned();
+        fs::write(folder.join("cookies.txt"), "# Netscape HTTP Cookie File\n").unwrap();
+        *engine.cookies.lock().unwrap() = Some(Some(exported));
+        engine.close();
+        assert!(!folder.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn startup_removes_cookie_exports_left_by_ended_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let mut running = process::command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .spawn()
+            .unwrap();
+        let legacy = root.path().join("cookies-AbC123");
+        let reused = root
+            .path()
+            .join(format!("cookies-{}-AbC123", std::process::id()));
+        let ended = root.path().join("cookies-4294967292-AbC123");
+        let live = root.path().join(format!("cookies-{}-AbC123", running.id()));
+        for folder in [&legacy, &reused, &ended, &live] {
+            fs::create_dir(folder).unwrap();
+            fs::write(folder.join("cookies.txt"), "secret").unwrap();
+        }
+        fs::create_dir(root.path().join("ytdlp-bin")).unwrap();
+        fs::write(root.path().join("cookies-note.txt"), "kept").unwrap();
+        let _engine = engine(root.path());
+        let _ = running.kill();
+        let _ = running.wait();
+        assert!(!legacy.exists());
+        assert!(!reused.exists());
+        assert!(!ended.exists());
+        assert!(live.join("cookies.txt").is_file());
+        assert!(root.path().join("ytdlp-bin").is_dir());
+        assert!(root.path().join("cookies-note.txt").is_file());
+    }
+
+    #[test]
     fn stale_destination_answer_does_not_release_current_prompt() {
         let root = tempfile::tempdir().unwrap();
         let engine = engine(root.path());
@@ -1119,6 +1337,36 @@ mod tests {
         );
         assert_eq!(event["percent"], 50.0);
         assert!(event["log"].as_str().unwrap().contains("50.0%"));
+    }
+
+    #[test]
+    fn fragment_progress_uses_decimal_estimates() {
+        let event = progress_event(
+            &json!({"downloaded_bytes":1024.0,"total_bytes_estimate":2048.6,"speed":512.5,"eta":2.4}),
+        );
+        assert_eq!(event["percent"], 50.0);
+        let line = event["log"].as_str().unwrap();
+        assert!(line.contains("50.0% of 2.0 KB"), "{line}");
+        assert!(line.contains("ETA 0:02"), "{line}");
+        let exact = progress_event(
+            &json!({"downloaded_bytes":256,"total_bytes":1024,"total_bytes_estimate":4096.5}),
+        );
+        assert_eq!(exact["percent"], 25.0);
+    }
+
+    #[test]
+    fn flipperclipper_opens_single_videos_but_not_each_playlist_entry() {
+        let request = |kind: &str, mode: &str| {
+            serde_json::from_value::<DownloadRequest>(json!({"url":"https://example.com/video",
+                "type":kind,"mode":mode,"pass_to_flipperclipper":true}))
+            .unwrap()
+        };
+        assert!(opens_in_flipperclipper(&request("single", "video")));
+        assert!(!opens_in_flipperclipper(&request("single", "audio")));
+        assert!(!opens_in_flipperclipper(&request("playlist", "video")));
+        let mut unrequested = request("single", "video");
+        unrequested.pass_to_flipperclipper = false;
+        assert!(!opens_in_flipperclipper(&unrequested));
     }
 
     #[test]
